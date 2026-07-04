@@ -315,7 +315,7 @@ app.get('/db/sms-data', async (req, res) => {
 // ==========================================
 // 🗑️ CLEAN HISTORY ROUTE
 // ==========================================
-app.delete('/history/clear', async (req, res) => {
+app.delete('/api/history/clear', async (req, res) => {
     try {
         // TRUNCATE is faster and resets auto-increment IDs. 
         // If your database uses foreign key restrictions, use "DELETE FROM sms_data" instead.
