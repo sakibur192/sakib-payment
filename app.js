@@ -137,6 +137,9 @@ app.post('/verify', async (req, res) => {
 });
 
 
+// Helper utility function to stall thread execution for a given time
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 app.post('/verify-lock', async (req, res) => {
   try {
     // 1. Check for Hardcoded Auth Key in Headers
@@ -162,23 +165,44 @@ app.post('/verify-lock', async (req, res) => {
     const normalizedTrx = trx_id.trim();
     const targetAmount = Number(amount);
 
-    // 3. Query the sms_data table populated by your /sms gateway route
-    const smsMatch = await db.query(
-      'SELECT * FROM sms_data WHERE trx_id = $1',
-      [normalizedTrx]
-    );
+    let smsMatch = null;
+    const maxRetries = 5;
+    const delayMs = 2000; // 2 seconds
 
-    // Case A: The Transaction ID does not exist at all in our ledger records
+    console.log(`🔍 [VERIFY REQUEST]: Starting search polling sequence for TRX: ${normalizedTrx}`);
+
+    // 🔄 3. Polling Loop: Retry up to 5 times every 2 seconds if not found
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      smsMatch = await db.query(
+        'SELECT * FROM sms_data WHERE trx_id = $1',
+        [normalizedTrx]
+      );
+
+      // If a record is found, break out of the retry loop immediately
+      if (smsMatch.rows.length > 0) {
+        console.log(`🎯 [FOUND]: TRX ${normalizedTrx} discovered in database on attempt #${attempt}`);
+        break;
+      }
+
+      // If this was the last attempt and still not found, don't sleep, just let the code drop through
+      if (attempt < maxRetries) {
+        console.log(`⏳ [POLLING]: TRX ${normalizedTrx} not found on attempt #${attempt}. Retrying in 2s...`);
+        await delay(delayMs);
+      }
+    }
+
+    // Case A: The Transaction ID does not exist at all after 5 attempts (10 seconds total)
     if (smsMatch.rows.length === 0) {
+      console.log(`❌ [NOT FOUND]: Polling exhausted. TRX ${normalizedTrx} completely absent from ledger.`);
       return res.status(404).json({
         status: 'not_found',
-        message: 'Transaction ID not verified by gateway network SMS records yet.'
+        message: 'Transaction ID not verified by gateway network SMS records after polling timeout.'
       });
     }
 
     const gatewayRecord = smsMatch.rows[0];
 
-    // 🛑 NEW PROTECTION RULE: Check if this transaction has already been used/verified
+    // 🛑 PROTECTION RULE: Check if this transaction has already been used/verified
     if (gatewayRecord.status === 'verified' || gatewayRecord.is_verified === true) {
       console.warn(`⚠️ [DUPLICATE ATTEMPT]: TRX ${normalizedTrx} has already been verified and claimed previously.`);
       return res.status(409).json({
@@ -197,7 +221,6 @@ app.post('/verify-lock', async (req, res) => {
     }
 
     // 🔒 LOCK THE TRANSACTION: Mark it as verified in the database right now
-    // (If your column name is different, adjust 'status = $1' to match your schema layout)
     await db.query(
       'UPDATE sms_data SET status = $1 WHERE trx_id = $2',
       ['verified', normalizedTrx]
@@ -278,29 +301,17 @@ app.get('/dbset', async (req, res) => {
 // 📱 ANDROID APP BACKEND FEED EDGE
 // ==========================================
 app.get('/db/sms-data', async (req, res) => {
-  try {
-    // Queries all logs sorted from newest to oldest
-    const historyLogs = await db.query(
-      `SELECT trx_id, amount, sender, created_at 
-       FROM sms_data 
-       ORDER BY id DESC`
-    );
-
-    // Logs access connection context for server monitoring
-    console.log(`📱 Android App requested history feed. Dispatching ${historyLogs.rows.length} rows.`);
-
-    // Returns a raw clean JSON Array to match Retrofit's expect matrix
-    return res.status(200).json(historyLogs.rows);
-
-  } catch (err) {
-    console.error('❌ Error executing database history query:', err);
-    return res.status(500).json({ 
-      status: 'error', 
-      message: 'Failed to fetch transaction records from ledger storage.' 
-    });
-  }
+    try {
+        // Explicitly include status in the column selection field list
+        const query = 'SELECT trx_id, amount, sender, created_at, status FROM sms_data ORDER BY created_at DESC;';
+        const result = await db.query(query);
+        
+        return res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('❌ Failed to pull data ledger logs:', error);
+        return res.status(500).json({ error: error.message });
+    }
 });
-
 // ==========================================
 // 🗑️ CLEAN HISTORY ROUTE
 // ==========================================
