@@ -16,6 +16,10 @@ app.use((req, res, next) => {
 
 
 app.post('/sms', async (req, res) => {
+
+  console.log(req.body);
+  
+
   try {
     const { trx_id, amount, sender } = req.body;
 
