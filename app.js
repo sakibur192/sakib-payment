@@ -8,7 +8,10 @@ app.use(express.json());
 
 
 
-
+app.use((req, res, next) => {
+  console.log(`📡 [INCOMING REQUEST]: ${req.method} ${req.url} - ${new Date().toISOString()}`);
+  next();
+});
 
 
 
