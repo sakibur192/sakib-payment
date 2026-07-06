@@ -729,10 +729,16 @@ app.post('/api/admin/users/add-code', async (req, res) => {
 // ৩. অ্যান্ড্রয়েড অ্যাপ থেকে আসা রেমিটেন্স এসএমএস স্টোর করার রাউট
 app.post('/sms-rem', async (req, res) => {
   try {
-    const { sms_body, amount } = req.body;
+    // Extract what Kotlin is actually sending (sender and amount)
+    const { sender, amount } = req.body;
+
+    // Use sender as the sms_body text content
+    const sms_body = sender;
 
     if (!sms_body || !amount) {
-      return res.status(400).json({ error: "sms_body and amount are strictly required." });
+      return res.status(400).json({ 
+        error: "sender (as sms_body) and amount are strictly required." 
+      });
     }
 
     // রেমিটেন্স ডাটাবেসে সম্পূর্ণ মেসেজ ও অ্যামাউন্ট pending হিসেবে জমা হবে
