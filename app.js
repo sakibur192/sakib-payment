@@ -721,7 +721,57 @@ app.post('/api/admin/users/add-code', async (req, res) => {
   }
 });
 
+// ১. সমস্ত ইউজার এবং তাদের অ্যাসাইন করা সব কোডের হিস্ট্রি একসাথে দেখা
+app.get('/api/admin/users/list', async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        u.id,
+        u.username,
+        u.deposit_user_code,
+        u.is_private_user,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'code_id', c.id,
+              'secret_code', c.secret_transaction_code,
+              'is_active', c.is_code_active,
+              'created_at', c.created_at
+            )
+          ) FILTER (WHERE c.id IS NOT NULL), '[]'
+        ) as all_codes
+      FROM users_v2 u
+      LEFT JOIN user_codes c ON u.id = c.user_id
+      GROUP BY u.id, u.username, u.deposit_user_code, u.is_private_user
+      ORDER BY u.id DESC;
+    `;
+    const result = await db.query(query);
+    return res.status(200).json({ success: true, users: result.rows });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 
+// ২. সুনির্দিষ্ট কোনো একটি কোড আইডি ধরে তার লাইফসাইকেল অন/অফ করা
+app.post('/api/admin/codes/toggle-status', async (req, res) => {
+  try {
+    const { code_id, target_status } = req.body; // target_status: true/false
+
+    if (code_id === undefined || target_status === undefined) {
+      return res.status(400).json({ error: "code_id and target_status are required." });
+    }
+
+    // নির্দিষ্ট কোডটি আপডেট করুন
+    await db.query(
+      `UPDATE user_codes SET is_code_active = $1 WHERE id = $2`,
+      [target_status, code_id]
+    );
+
+    return res.json({ success: true, message: `Specific token status mutated to ${target_status}` });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
 // =========================================================================
 // 📱 APP EDGE: INCOMING REMITTANCE SMS INGESTION
 // =========================================================================
