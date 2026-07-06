@@ -409,6 +409,1074 @@ app.get('/api/dashboard', async (req, res) => {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// =========================================================================
+// 🚀 ALL-IN-ONE SCHEMA MIGRATION & INITIALIZATION ROUTE
+// =========================================================================
+app.get('/api/migrate-v2', async (req, res) => {
+  try {
+    console.log("⚙️ Initializing database structure deployment pipeline...");
+
+    // ১. Main User Profiles Table তৈরি করা (Remittance ও Private User উভয়ের জন্য)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS users_v2 (
+          id SERIAL PRIMARY KEY,
+          username VARCHAR(100) UNIQUE NOT NULL,
+          deposit_user_code VARCHAR(100) UNIQUE NOT NULL, 
+          is_private_user BOOLEAN DEFAULT FALSE,          
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // ২. Multiple Secret Codes Ledger Table তৈরি করা
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_codes (
+          id SERIAL PRIMARY KEY,
+          user_id INT REFERENCES users_v2(id) ON DELETE CASCADE,
+          secret_transaction_code VARCHAR(100) UNIQUE NOT NULL,
+          is_code_active BOOLEAN DEFAULT TRUE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // ৩. Dedicated Remittance Message Storage Table তৈরি করা
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS remittance_sms_data (
+          id SERIAL PRIMARY KEY,
+          sms_body TEXT NOT NULL,                         
+          amount NUMERIC(10, 2) NOT NULL,                 
+          status VARCHAR(20) DEFAULT 'pending',           
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log("✅ Tables deployed successfully. Injecting seed data...");
+
+    // ৪. প্রথমবার রান করার সময় টেস্ট করার জন্য একটি ডিফল্ট রেমিটেন্স ইউজার প্রোফাইল ইনসার্ট করা
+    const seedUser = await db.query(`
+      INSERT INTO users_v2 (username, deposit_user_code, is_private_user)
+      VALUES ('Remittance Test Client', 'REM_USER_77', false)
+      ON CONFLICT (deposit_user_code) DO UPDATE SET username = EXCLUDED.username
+      RETURNING id;
+    `);
+
+    const targetUserId = seedUser.rows[0].id;
+
+    // ৫. উক্ত টেস্ট ইউজারের জন্য একটি ডিফল্ট একটিভ কোড ইনসার্ট করা
+    await db.query(`
+      INSERT INTO user_codes (user_id, secret_transaction_code, is_code_active)
+      VALUES ($1, 'SECRET99', true)
+      ON CONFLICT (secret_transaction_code) DO NOTHING;
+    `, [targetUserId]);
+
+    console.log("⚙️ Database migration and seeding execution completed successfully.");
+
+    return res.status(200).json({
+      success: true,
+      message: "Database architecture successfully migrated! Built tables: users_v2, user_codes, and remittance_sms_data. Seed profile active.",
+      test_credentials: {
+        deposit_user_code: "REM_USER_77",
+        active_secret_code: "SECRET99",
+        note: "Use these values to test your /api/verify/remittance endpoint layout."
+      }
+    });
+
+  } catch (err) {
+    console.error('❌ Migration routing pipeline critical failure:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error executing architecture setup script.',
+      error: err.message
+    });
+  }
+});
+
+// =========================================================================
+// 🔄 DATABASE SCHEMATIC PATCH: CREATE PRIVATE USER TRANSACTIONS TABLE
+// =========================================================================
+app.get('/api/migrate/create-private-ledger', async (req, res) => {
+  try {
+    console.log("⚙️ Deploying Private User Transactions Ledger Table...");
+
+    // private_user_transactions টেবিল তৈরি করার কুয়েরি
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS private_user_transactions (
+          id SERIAL PRIMARY KEY,
+          user_id INT REFERENCES users_v2(id) ON DELETE CASCADE, 
+          verified_by_code_id INT REFERENCES user_codes(id),      
+          submitted_user_code VARCHAR(100),                       
+          amount NUMERIC(10, 2) NOT NULL,                         
+          status VARCHAR(20) DEFAULT 'success',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log("✅ Table 'private_user_transactions' deployed or verified successfully.");
+
+    return res.status(200).json({
+      success: true,
+      message: "Database schema updated successfully! 'private_user_transactions' table is now active.",
+      action_required: "You can now safely run the Private User verification and history APIs."
+    });
+
+  } catch (err) {
+    console.error('❌ Private ledger table deployment failed:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create private user transactions table.',
+      error: err.message
+    });
+  }
+});
+// =========================================================================
+// 🔄 DATABASE SCHEMATIC PATCH: ADD HISTORY TRACKING COLUMN
+// =========================================================================
+app.get('/api/migrate/add-history-column', async (req, res) => {
+  try {
+    console.log("⚙️ Executing database structure update...");
+
+    // remittance_sms_data টেবিলে verified_by_code_id ফরেন কি কলামটি যুক্ত করার কুয়েরি
+    // await db.query(`
+    //   ALTER TABLE remittance_sms_data 
+    //   ADD COLUMN IF NOT EXISTS verified_by_code_id INT REFERENCES user_codes(id);
+    // `);
+
+// এই কুয়েরিটি আপনার মাইগ্রেশন রাউটের ভেতরে রান করে নিন
+await db.query(`
+  ALTER TABLE remittance_sms_data 
+  ADD COLUMN IF NOT EXISTS submitted_user_code VARCHAR(100);
+`);
+
+    console.log("✅ Column 'verified_by_code_id' verified or added successfully.");
+
+    return res.status(200).json({
+      success: true,
+      message: "Database schema patched successfully! 'verified_by_code_id' column is now active in 'remittance_sms_data' table.",
+      action_required: "You can now safely run the verification and history APIs."
+    });
+
+  } catch (err) {
+    console.error('❌ Schema patch deployment failed:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update database schema structure.',
+      error: err.message
+    });
+  }
+});
+
+// =========================================================================
+// 👑 ADMIN PANEL: USER & CODE MANAGER (For Remittance)
+// =========================================================================
+
+// ১. এডমিন নতুন রেমিটেন্স ইউজার তৈরি করবে
+app.post('/api/admin/users', async (req, res) => {
+  try {
+    const { username, deposit_user_code } = req.body;
+
+    if (!username || !deposit_user_code) {
+      return res.status(400).json({ error: "Username and deposit_user_code are required." });
+    }
+
+    const result = await db.query(
+      `INSERT INTO users_v2 (username, deposit_user_code, is_private_user)
+       VALUES ($1, $2, false)
+       RETURNING *`,
+      [username.trim(), deposit_user_code.trim()]
+    );
+
+    return res.status(201).json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ২. এডমিন ইউজারের জন্য নতুন সিক্রেট কোড সেট করবে (আগের কোড অটো-নিষ্ক্রিয় হবে)
+app.post('/api/admin/users/add-code', async (req, res) => {
+  try {
+    const { deposit_user_code, secret_transaction_code } = req.body;
+
+    if (!deposit_user_code || !secret_transaction_code) {
+      return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    // ইউজার আইডি খুঁজে বের করা
+    const userResult = await db.query('SELECT id FROM users_v2 WHERE deposit_user_code = $1', [deposit_user_code.trim()]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: "User profile not found." });
+    }
+    const userId = userResult.rows[0].id;
+
+    // 🛑 নিয়ম: ওই ইউজারের আগের সব কোড আগে Inactive (false) করা হবে
+    await db.query('UPDATE user_codes SET is_code_active = false WHERE user_id = $1', [userId]);
+
+    // নতুন কোডটি Active (true) হিসেবে ইনসার্ট করা
+    const result = await db.query(
+      `INSERT INTO user_codes (user_id, secret_transaction_code, is_code_active)
+       VALUES ($1, $2, true)
+       RETURNING *`,
+      [userId, secret_transaction_code.trim()]
+    );
+
+    return res.status(201).json({ 
+      success: true, 
+      message: "New code activated. Previous codes deactivated.", 
+      code_data: result.rows[0] 
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+// =========================================================================
+// 📱 APP EDGE: INCOMING REMITTANCE SMS INGESTION
+// =========================================================================
+
+// ৩. অ্যান্ড্রয়েড অ্যাপ থেকে আসা রেমিটেন্স এসএমএস স্টোর করার রাউট
+app.post('/sms-rem', async (req, res) => {
+  try {
+    const { sms_body, amount } = req.body;
+
+    if (!sms_body || !amount) {
+      return res.status(400).json({ error: "sms_body and amount are strictly required." });
+    }
+
+    // রেমিটেন্স ডাটাবেসে সম্পূর্ণ মেসেজ ও অ্যামাউন্ট pending হিসেবে জমা হবে
+    const result = await db.query(
+      `INSERT INTO remittance_sms_data (sms_body, amount, status) 
+       VALUES ($1, $2, 'pending') 
+       RETURNING *`,
+      [sms_body, Number(amount)]
+    );
+
+    return res.json({ 
+      status: 'inserted', 
+      message: 'Remittance SMS logged successfully.',
+      data: result.rows[0] 
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+// =========================================================================
+// 🌍 USER END: WEBSITE VERIFICATION GATEWAY
+// =========================================================================
+
+// ৪. কাস্টমার যখন ওয়েবসাইট থেকে সাবমিট করবে, তখন ভেরিফাই করার রাউট
+// =========================================================================
+// 🌍 USER END: WEBSITE VERIFICATION GATEWAY (SECURE ID BYPASS)
+// =========================================================================
+
+app.post('/api/verify/remittance', async (req, res) => {
+  try {
+    const { deposit_user_code, secret_transaction_code, amount } = req.body;
+
+    // ভ্যালিডেশন চেক
+    if (!secret_transaction_code || !amount) {
+      return res.status(400).json({ error: "secret_transaction_code and amount are required." });
+    }
+
+    // 🎯 [RULE]: deposit_user_code ডাটাবেসে চেক করা হবে না। 
+    // কেবল চেক করা হবে এই secret_transaction_code-টি সিস্টেমে বর্তমানে ACTIVE আছে কি না।
+    const codeCheck = await db.query(
+      `SELECT c.*, u.is_private_user 
+       FROM user_codes c
+       JOIN users_v2 u ON c.user_id = u.id
+       WHERE c.secret_transaction_code = $1 
+         AND c.is_code_active = true 
+         AND u.is_private_user = false`,
+      [secret_transaction_code.trim()]
+    );
+
+    if (codeCheck.rows.length === 0) {
+      return res.status(401).json({ 
+        status: 'error', 
+        message: 'Invalid, expired, or inactive remittance transaction code.' 
+      });
+    }
+
+    const activeCodeId = codeCheck.rows[0].id;
+    const targetAmount = Number(amount);
+    
+    // /sms-rem (remittance_sms_data) টেবিল থেকে কাস্টমারের সাবমিট করা অ্যামাউন্টের সাথে pending মেসেজ ম্যাচ করা
+    const smsMatch = await db.query(
+      `SELECT * FROM remittance_sms_data 
+       WHERE amount = $1 AND status = 'pending' 
+       ORDER BY created_at DESC LIMIT 1`,
+      [targetAmount]
+    );
+
+    if (smsMatch.rows.length === 0) {
+      return res.status(404).json({ 
+        status: 'not_found', 
+        message: 'No live matching pending remittance SMS found for this amount.' 
+      });
+    }
+
+    const matchedSms = smsMatch.rows[0];
+    const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+    // 🔒 [UPDATED]: এখন status ও verified_by_code_id এর পাশাপাশি 
+    // কাস্টমারের সাবমিট করা deposit_user_code ও ডাটাবেসে স্থায়ীভাবে সেভ হবে।
+    await db.query(
+      `UPDATE remittance_sms_data 
+       SET status = 'verified', 
+           verified_by_code_id = $1,
+           submitted_user_code = $2 
+       WHERE id = $3`, 
+      [activeCodeId, clientUserCode, matchedSms.id]
+    );
+
+    // 🎯 সাকসেস রেসপন্স: আগের মতোই কাস্টমারের পাঠানো আইডিটি সরাসরি রিটার্ন করা হচ্ছে
+    return res.json({
+      status: 'success',
+      deposit_user_code: clientUserCode,
+      amount: targetAmount
+    });
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+// =========================================================================
+// 📊 ADMIN ANALYTICS: TOTAL & USER-WISE REMITTANCE HISTORY
+// =========================================================================
+
+// ১. টোটাল রেমিটেন্স হিস্টোরি (সব সাকসেস এবং পেন্ডিং ট্রানজেকশন একসঙ্গে)
+app.get('/api/admin/remittance/history-all', async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        r.id AS transaction_id,
+        r.sms_body,
+        r.amount,
+        r.status,
+        r.submitted_user_code AS claimed_by_player_id, -- 🎯 [NEW]: কাস্টমার যে আইডি ইনপুট দিয়েছিল
+        r.created_at AS sms_received_at,
+        u.username AS admin_configured_user,
+        c.secret_transaction_code AS used_secret_code
+      FROM remittance_sms_data r
+      LEFT JOIN user_codes c ON r.verified_by_code_id = c.id
+      LEFT JOIN users_v2 u ON c.user_id = u.id
+      ORDER BY r.created_at DESC;
+    `;
+
+    const result = await db.query(query);
+    return res.status(200).json({
+      success: true,
+      total_records: result.rowCount,
+      history: result.rows
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ২. ইউজারভিত্তিক রেমিটেন্স হিস্টোরি (নির্দিষ্ট কোনো ইউজারের সমস্ত সফল ট্রানজেকশন)
+// এখানে URL এ ইউজারের unique id বা username পাস করতে হবে (উদা: /api/admin/remittance/history-user/1)
+
+
+app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // 🎯 UPDATE: কুয়েরিতে r.submitted_user_code কলামটি যুক্ত করা হয়েছে
+    const query = `
+      SELECT 
+        r.id AS transaction_id,
+        r.sms_body,
+        r.amount,
+        r.status,
+        r.submitted_user_code AS claimed_by_player_id, -- কাস্টমার যে আইডি ইনপুট দিয়েছিল
+        r.created_at AS processed_at,
+        c.secret_transaction_code AS used_secret_code
+      FROM remittance_sms_data r
+      JOIN user_codes c ON r.verified_by_code_id = c.id
+      WHERE c.user_id = $1 AND r.status = 'verified'
+      ORDER BY r.created_at DESC;
+    `;
+
+    const result = await db.query(query, [userId]);
+    
+    // ইউজারের নাম আলাদাভাবে জানার জন্য
+    const userCheck = await db.query('SELECT username, deposit_user_code FROM users_v2 WHERE id = $1', [userId]);
+    
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "User profile not found." });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: userCheck.rows[0],
+      total_verified_transactions: result.rowCount,
+      history: result.rows
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+
+
+
+
+
+app.post('/api/verify/private-user', async (req, res) => {
+  try {
+    const { deposit_user_code, secret_transaction_code, amount } = req.body;
+
+    if (!secret_transaction_code || !amount) {
+      return res.status(400).json({ error: "secret_transaction_code and amount are required." });
+    }
+
+    // ১. চেক করা: কোডটি ACTIVE এবং PRIVATE USER এর কি না
+    const privateCodeCheck = await db.query(
+      `SELECT c.id AS code_id, u.id AS user_id, u.username
+       FROM user_codes c
+       JOIN users_v2 u ON c.user_id = u.id
+       WHERE c.secret_transaction_code = $1 
+         AND c.is_code_active = true 
+         AND u.is_private_user = true`,
+      [secret_transaction_code.trim()]
+    );
+
+    if (privateCodeCheck.rows.length === 0) {
+      return res.status(401).json({
+        status: 'unauthorized',
+        message: 'Access denied. Secret code is invalid or unauthorized for Private User bypass.'
+      });
+    }
+
+    const { code_id, user_id, username } = privateCodeCheck.rows[0];
+    const targetAmount = Number(amount);
+    const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+    // 🔒 [NEW TRACKING STEP]: সফল ট্রানজেকশনটি লেজার টেবিলে স্থায়ীভাবে সেভ করা
+    await db.query(
+      `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status)
+       VALUES ($1, $2, $3, $4, 'success')`,
+      [user_id, code_id, clientUserCode, targetAmount]
+    );
+
+    console.log(`💎 [VIP BYPASS LOGGED]: Approved and recorded for Admin '${username}' -> Player '${clientUserCode}'`);
+
+    return res.json({
+      status: 'success',
+      is_vip_bypass: true,
+      deposit_user_code: clientUserCode,
+      amount: targetAmount
+    });
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
+
+app.get('/api/admin/private/history-all', async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        p.id AS transaction_id,
+        p.amount,
+        p.status,
+        p.submitted_user_code AS claimed_by_player_id, -- কাস্টমারের ইনপুট দেওয়া প্লেয়ার আইডি
+        p.created_at AS processed_at,
+        u.username AS admin_configured_user,
+        c.secret_transaction_code AS used_secret_code
+      FROM private_user_transactions p
+      JOIN user_codes c ON p.verified_by_code_id = c.id
+      JOIN users_v2 u ON p.user_id = u.id
+      ORDER BY p.created_at DESC;
+    `;
+
+    const result = await db.query(query);
+    return res.status(200).json({
+      success: true,
+      total_vip_records: result.rowCount,
+      history: result.rows
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+
+app.get('/api/admin/private/history-user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const query = `
+      SELECT 
+        p.id AS transaction_id,
+        p.amount,
+        p.status,
+        p.submitted_user_code AS claimed_by_player_id,
+        p.created_at AS processed_at,
+        c.secret_transaction_code AS used_secret_code
+      FROM private_user_transactions p
+      JOIN user_codes c ON p.verified_by_code_id = c.id
+      WHERE p.user_id = $1
+      ORDER BY p.created_at DESC;
+    `;
+
+    const result = await db.query(query, [userId]);
+    
+    // ইউজারের ডাটা চেক
+    const userCheck = await db.query('SELECT username, deposit_user_code FROM users_v2 WHERE id = $1 AND is_private_user = true', [userId]);
+    
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Private User profile not found." });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: userCheck.rows[0],
+      total_vip_transactions: result.rowCount,
+      history: result.rows
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+
+
+
+
+
+
+
+app.post('/api/admin/gateway/update-number', async (req, res) => {
+  try {
+    const { action, gateway_name, wallet_number } = req.body;
+
+    // ১. রানটাইম টেবিল অ্যাসুরেন্স (টেবিল না থাকলে অটোমেটিক তৈরি হবে)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS mfs_gateways (
+        gateway_name VARCHAR(50) PRIMARY KEY,
+        wallet_number VARCHAR(20) NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // ২. অ্যাকশন বেসড রাউটিং লজিক
+    
+    // --- [ACTION: GET] --- বর্তমান সব গেটওয়ের লিস্ট দেখা
+    if (action === 'get') {
+      const listData = await db.query(`SELECT gateway_name, wallet_number, updated_at FROM mfs_gateways ORDER BY gateway_name ASC`);
+      return res.json({ 
+        success: true, 
+        count: listData.rows.length,
+        gateways: listData.rows 
+      });
+    }
+
+    // --- [ACTION: DELETE] --- নির্দিষ্ট গেটওয়ে ডিলিট করা
+    if (action === 'delete') {
+      if (!gateway_name) {
+        return res.status(400).json({ error: "gateway_name is required for delete action." });
+      }
+      
+      const deleteResult = await db.query(
+        `DELETE FROM mfs_gateways WHERE gateway_name = $1`, 
+        [gateway_name.trim()]
+      );
+
+      if (deleteResult.rowCount === 0) {
+        return res.status(404).json({ error: `Gateway '${gateway_name}' not found.` });
+      }
+
+      return res.json({ success: true, message: `Gateway '${gateway_name}' deleted successfully.` });
+    }
+
+    // --- [ACTION: UPSERT / DEFAULT] --- নম্বর অ্যাড অথবা আপডেট করা
+    // যদি একশন ফাকা থাকে বা 'upsert' পাঠানো হয়
+    if (!action || action === 'upsert') {
+      if (!gateway_name || !wallet_number) {
+        return res.status(400).json({ error: "gateway_name and wallet_number are required for adding/updating numbers." });
+      }
+
+      await db.query(
+        `INSERT INTO mfs_gateways (gateway_name, wallet_number, updated_at) 
+         VALUES ($1, $2, CURRENT_TIMESTAMP) 
+         ON CONFLICT (gateway_name) 
+         DO UPDATE SET wallet_number = EXCLUDED.wallet_number, updated_at = CURRENT_TIMESTAMP`,
+        [gateway_name.trim(), wallet_number.trim()]
+      );
+
+      return res.json({ 
+        success: true, 
+        message: `Gateway '${gateway_name}' with number '${wallet_number}' configured successfully.` 
+      });
+    }
+
+    // যদি এমন কোনো অ্যাকশন পাঠানো হয় যা ডিফাইন করা নেই
+    return res.status(400).json({ error: "Invalid action. Supported actions are: 'upsert', 'delete', 'get'." });
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+// =========================================================
+// 🌐 [CORE ROOT ROUTE]: ডাইনামিক নিয়ন ওয়েব পোর্টাল (/)
+// =========================================================
+// =========================================================
+// 🌐 [CORE ROOT ROUTE]: কন্ডিশনাল গেটওয়ে ভিজিবিলিটি পোর্টাল (/)
+// =========================================================
+
+
+
+
+// =========================================================
+// 🌐 [CORE ROOT ROUTE]: ইন-কার্ড নোটিফিকেশন ও আইসোলেটেড ট্যাব ইঞ্জিন (/)
+// =========================================================
+app.get('/', async (req, res) => {
+  try {
+    let numbers = {};
+    try {
+      const rows = await db.query("SELECT gateway_name, wallet_number FROM mfs_gateways");
+      rows.rows.forEach(row => {
+        if (row.wallet_number && row.wallet_number.trim() !== '') {
+          numbers[row.wallet_number.trim()] = row.gateway_name.trim();
+        }
+      });
+    } catch (e) {
+      console.log("ℹ️ Fallback to default mock gateways.");
+      numbers = {
+        '01900000000': 'nagad_agent',
+        '01333992633': 'bkash_agent',
+        '01700000000': 'rocket_personal',
+        '01800000000': 'bkash_payment'
+      };
+    }
+
+    const html = `
+    <!DOCTYPE html>
+    <html lang="bn">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-select=no">
+        <title>Secure Gateway Engine</title>
+        <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;600;700&display=swap" rel="stylesheet">
+        <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Hind Siliguri', sans-serif; -webkit-tap-highlight-color: transparent; }
+            body { background-color: #070b13; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 16px; }
+            
+            /* Main App Card Container */
+            .gateway-card { width: 100%; max-width: 410px; background: #0f1626; border: 1px solid #1e2d4a; border-radius: 24px; box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.8); padding: 26px; position: relative; overflow: hidden; }
+            
+            /* Segmented Tabs Component */
+            .tab-container { display: flex; background: #080d1a; border-radius: 14px; padding: 5px; margin-bottom: 20px; border: 1px solid #162238; }
+            .tab-btn { flex: 1; padding: 14px; background: transparent; border: none; color: #64748b; font-size: 15px; font-weight: 700; cursor: pointer; border-radius: 11px; transition: all 0.25s ease; text-align: center; }
+            .tab-btn.active { color: #ffffff; background: linear-gradient(135deg, #06b6d4, #3b82f6); box-shadow: 0 4px 15px rgba(6, 182, 212, 0.35); }
+            
+            /* Isolated Tab Content Wrapper */
+            .tab-content-panel { display: none; animation: tabFadeIn 0.35s ease-out forwards; }
+            .tab-content-panel.active-panel { display: block; }
+
+            /* 🎯 In-Card Response Alert Box */
+            .in-card-alert { background: #080d1a; border-radius: 14px; padding: 14px 16px; margin-bottom: 18px; display: none; align-items: flex-start; gap: 10px; border: 1px solid transparent; animation: alertPopIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.1); }
+            .in-card-alert.success { display: flex; border-color: #10b981; background: rgba(16, 185, 129, 0.04); color: #10b981; }
+            .in-card-alert.error { display: flex; border-color: #ef4444; background: rgba(239, 68, 68, 0.04); color: #ef4444; }
+            .alert-text { font-size: 14px; font-weight: 600; line-height: 1.4; color: #e2e8f0; }
+            .in-card-alert.success .alert-icon { color: #10b981; font-weight: 700; }
+            .in-card-alert.error .alert-icon { color: #ef4444; font-weight: 700; }
+
+            /* Form Elements */
+            .form-group { margin-bottom: 18px; position: relative; }
+            .form-input { width: 100%; height: 56px; background: #080d1a; border: 1px solid #162238; border-radius: 14px; padding: 0 18px; color: #ffffff; font-size: 16px; font-weight: 600; transition: all 0.25s ease; }
+            .form-input:focus { outline: none; border-color: #06b6d4; box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.15); }
+            .form-input::placeholder { color: #475569; font-weight: 400; }
+            
+            /* Conditional Gateway Section Smooth Open */
+            .gateway-conditional-flow { display: none; opacity: 0; transform: translateY(-8px); transition: all 0.3s ease; }
+            .gateway-conditional-flow.show { display: block; opacity: 1; transform: translateY(0); }
+            
+            /* MFS Grid System */
+            .radio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+            .radio-tile { display: flex; align-items: center; background: #080d1a; border: 1px solid #162238; padding: 14px; border-radius: 14px; cursor: pointer; transition: all 0.2s ease; user-select: none; }
+            .radio-tile:hover { border-color: #243552; }
+            .radio-tile input { margin-right: 12px; accent-color: #06b6d4; width: 19px; height: 19px; }
+            .radio-label { color: #94a3b8; font-size: 14px; font-weight: 700; text-transform: capitalize; }
+            .radio-tile input:checked + .radio-label { color: #ffffff; }
+            .radio-tile.selected-border { border-color: #06b6d4; background: rgba(6, 182, 212, 0.02); }
+            
+            /* Premium Sliding Copy Widget Box */
+            .copy-widget-box { background: linear-gradient(135deg, #06b6d4, #3b82f6); border-radius: 14px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; display: none; opacity: 0; transform: scale(0.97); transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1); box-shadow: 0 8px 20px rgba(6, 182, 212, 0.2); }
+            .copy-widget-box.pop { display: flex; opacity: 1; transform: scale(1); }
+            .copy-details { display: flex; flex-direction: column; }
+            .copy-instruction { font-size: 13px; color: rgba(255, 255, 255, 0.85); font-weight: 600; }
+            .copy-number-val { font-size: 19px; font-weight: 800; color: #ffffff; margin-top: 2px; letter-spacing: 0.8px; }
+            .action-copy-btn { background: rgba(255, 255, 255, 0.16); border: none; border-radius: 10px; color: #ffffff; cursor: pointer; padding: 10px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+            .action-copy-btn:hover { background: rgba(255, 255, 255, 0.26); }
+
+            /* Modern Submit Action Buttons */
+            .action-submit-btn { width: 100%; height: 56px; background: linear-gradient(90deg, #06b6d4, #3b82f6); border: none; border-radius: 14px; color: white; font-size: 16px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 6px 20px rgba(6, 182, 212, 0.2); margin-top: 6px; display: flex; align-items: center; justify-content: center; gap: 10px; }
+            .action-submit-btn:hover { opacity: 0.95; transform: translateY(-1px); }
+            .action-submit-btn:disabled { background: #1e293b; color: #64748b; cursor: not-allowed; transform: none; box-shadow: none; }
+            
+            .btn-spinner { width: 22px; height: 22px; border: 3px solid rgba(255, 255, 255, 0.3); border-top-color: #ffffff; border-radius: 50%; animation: spin 0.8s linear infinite; display: none; }
+
+            /* Animations */
+            @keyframes spin { to { transform: rotate(360deg); } }
+            @keyframes alertPopIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+            @keyframes tabFadeIn { from { opacity: 0; transform: scale(0.99); } to { opacity: 1; transform: scale(1); } }
+        </style>
+    </head>
+    <body>
+
+    <div class="gateway-card">
+        <div class="tab-container">
+            <button id="tabBtnPrivate" class="tab-btn active" onclick="switchUIPipeline('private')">Private User</button>
+            <button id="tabBtnRemit" class="tab-btn" onclick="switchUIPipeline('remit')">Remittance</button>
+        </div>
+
+        <div id="panelPrivate" class="tab-content-panel active-panel">
+            <div id="alertPrivate" class="in-card-alert">
+                <span class="alert-icon" id="alertIconPrivate">✓</span>
+                <span class="alert-text" id="alertMsgPrivate"></span>
+            </div>
+
+            <div class="form-group">
+                <input type="text" id="p_fieldPlayerId" class="form-input" placeholder="Player ID" autocomplete="off" />
+            </div>
+            <div class="form-group">
+                <input type="number" id="p_fieldAmount" class="form-input" placeholder="৳ Amount" autocomplete="off" />
+            </div>
+            <div class="form-group">
+                <input type="text" id="p_fieldTrxId" class="form-input" placeholder="TrxID" autocomplete="off" />
+            </div>
+            <button class="action-submit-btn" id="p_btnSubmit" onclick="dispatchEngineRequest('private')">
+                <div class="btn-spinner" id="p_spinner"></div>
+                <span id="p_btnText">জমা দিন</span>
+            </button>
+        </div>
+
+        <div id="panelRemit" class="tab-content-panel">
+            <div id="alertRemit" class="in-card-alert">
+                <span class="alert-icon" id="alertIconRemit">✓</span>
+                <span class="alert-text" id="alertMsgRemit"></span>
+            </div>
+
+            <div class="form-group">
+                <input type="text" id="r_fieldPlayerId" class="form-input" placeholder="Player ID" autocomplete="off" oninput="evaluateGatewayVisibility()" />
+            </div>
+
+            <div id="gatewayConditionalSection" class="gateway-conditional-flow">
+                <div class="radio-grid" id="mfsContainerWrapper"></div>
+                
+                <div class="copy-widget-box" id="walletCopyDisplayFrame">
+                    <div class="copy-details">
+                        <span id="instructionText" class="copy-instruction">ক্যাশ আউট করুন এই নম্বরে</span>
+                        <span class="copy-number-val" id="walletNumberValue"></span>
+                    </div>
+                    <button class="action-copy-btn" onclick="copyGatewayNumToClipboard()" title="Copy Target Number">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <input type="number" id="r_fieldAmount" class="form-input" placeholder="৳ Amount" autocomplete="off" />
+            </div>
+            <div class="form-group">
+                <input type="text" id="r_fieldTrxId" class="form-input" placeholder="TrxID" autocomplete="off" />
+            </div>
+            <button class="action-submit-btn" id="r_btnSubmit" onclick="dispatchEngineRequest('remit')">
+                <div class="btn-spinner" id="r_spinner"></div>
+                <span id="r_btnText">জমা দিন</span>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const systemLiveGateways = ${JSON.stringify(numbers)};
+        let activeTab = 'private';
+
+        // ১. রানটাইম ডাইনামিক রেডিও বাটন জেনারেটর
+        function renderDynamicMfsGrid() {
+            const gridWrapper = document.getElementById('mfsContainerWrapper');
+            gridWrapper.innerHTML = ''; 
+
+            Object.entries(systemLiveGateways).forEach(([walletNum, gatewayName]) => {
+                let labelText = gatewayName.replace('_', ' (').replace('payment', 'payment)').replace('agent', 'agent)').replace('personal', 'personal)');
+                
+                const label = document.createElement('label');
+                label.className = 'radio-tile';
+                label.id = 'tile_' + gatewayName;
+                
+                label.innerHTML = \`
+                    <input type="radio" name="gateway_select" value="\${gatewayName}" onchange="handleGatewayTrigger('\${gatewayName}', '\${walletNum}')">
+                    <span class="radio-label">\${labelText}</span>
+                \`;
+                gridWrapper.appendChild(label);
+            });
+        }
+
+        // ২. কন্ডিশনাল গেটওয়ে ভিজিবিলিটি লজিক (শুধুমাত্র রেমিটেন্স ট্যাবের ফার্স্ট ইনপুটের জন্য)
+        function evaluateGatewayVisibility() {
+            const currentText = document.getElementById('r_fieldPlayerId').value.trim();
+            const gatewaySection = document.getElementById('gatewayConditionalSection');
+            
+            if (activeTab === 'remit' && currentText.length > 0) {
+                gatewaySection.classList.add('show');
+            } else {
+                gatewaySection.classList.remove('show');
+                clearSelectedGatewaysOnly();
+            }
+        }
+
+        // ৩. বাটার স্মুথ ট্যাব রাউটার ইঞ্জিন (ডাটা মুভমেন্ট বা ব্লিডিং হবে না)
+        function switchUIPipeline(mode) {
+            activeTab = mode;
+            
+            // ট্যাব বাটন টগল করা
+            document.getElementById('tabBtnPrivate').classList.toggle('active', mode === 'private');
+            document.getElementById('tabBtnRemit').classList.toggle('active', mode === 'remit');
+            
+            // প্যানেল কন্টেন্ট আইসোলেশন
+            document.getElementById('panelPrivate').classList.toggle('active-panel', mode === 'private');
+            document.getElementById('panelRemit').classList.toggle('active-panel', mode === 'remit');
+            
+            // রেমিটেন্স ট্যাবে গেলে গেটওয়ে কন্ডিশন রি-ইভালুয়েট করা
+            if (mode === 'remit') {
+                evaluateGatewayVisibility();
+            }
+        }
+
+        function handleGatewayTrigger(key, number) {
+            resetSelectedTiles();
+            document.getElementById('tile_' + key).classList.add('selected-border');
+            
+            document.getElementById('walletNumberValue').innerText = number;
+            const txtFrame = document.getElementById('instructionText');
+            
+            if (key.includes('agent')) txtFrame.innerText = "ক্যাশ আউট করুন এই নম্বরে";
+            else if (key.includes('payment')) txtFrame.innerText = "পেমেন্ট করুন এই নম্বরে";
+            else txtFrame.innerText = "সেন্ড মানি করুন এই নম্বরে";
+            
+            document.getElementById('walletCopyDisplayFrame').classList.add('pop');
+        }
+
+        function resetSelectedTiles() {
+            document.querySelectorAll('.radio-tile').forEach(t => t.classList.remove('selected-border'));
+        }
+
+        function clearSelectedGatewaysOnly() {
+            document.getElementById('walletCopyDisplayFrame').classList.remove('pop');
+            document.getElementsByName('gateway_select').forEach(r => r.checked = false);
+            resetSelectedTiles();
+        }
+
+        // ৪. প্রফেশনাল ইন-কার্ড মেসেজিং সিস্টেম
+        function showInCardAlert(tab, type, message) {
+            const alertBox = document.getElementById(tab === 'private' ? 'alertPrivate' : 'alertRemit');
+            const iconNode = document.getElementById(tab === 'private' ? 'alertIconPrivate' : 'alertIconRemit');
+            const msgNode = document.getElementById(tab === 'private' ? 'alertMsgPrivate' : 'alertMsgRemit');
+
+            alertBox.className = 'in-card-alert ' + (type === 'success' ? 'success' : 'error');
+            iconNode.innerText = type === 'success' ? '✓' : '✕';
+            msgNode.innerText = message;
+        }
+
+        function copyGatewayNumToClipboard() {
+            const num = document.getElementById('walletNumberValue').innerText;
+            navigator.clipboard.writeText(num).then(() => {
+                showInCardAlert('remit', 'success', 'নম্বর কপি করা হয়েছে: ' + num);
+            });
+        }
+
+        // ৫. এপিআই ইঞ্জিন ডিসপ্যাচ ও সাবমিশন লাইফসাইকেল
+        function dispatchEngineRequest(tab) {
+            // আইসোলেটেড ফিল্ড ডাটা কালেকশন
+            const prefix = tab === 'private' ? 'p_' : 'r_';
+            const playerId = document.getElementById(prefix + 'fieldPlayerId').value.trim();
+            const amount = document.getElementById(prefix + 'fieldAmount').value.trim();
+            const trxId = document.getElementById(prefix + 'fieldTrxId').value.trim();
+            
+            // পূর্বের মেসেজ বা নোটিফিকেশন হাইড করা
+            document.getElementById(tab === 'private' ? 'alertPrivate' : 'alertRemit').className = 'in-card-alert';
+
+            if (!playerId || !amount || !trxId) {
+                showInCardAlert(tab, 'error', 'সবগুলো ইনপুট ফিল্ড সঠিকভাবে পূরণ করুন!');
+                return;
+            }
+
+            if (tab === 'remit') {
+                const radios = document.getElementsByName('gateway_select');
+                let selectionState = false;
+                for (let r of radios) { if (r.checked) selectionState = true; }
+                if (!selectionState) {
+                    showInCardAlert('remit', 'error', 'দয়া করে একটি গেটওয়ে সিলেক্ট করুন।');
+                    return;
+                }
+            }
+
+            // বাটন লোডার মেকানিজম অন করা
+            const btn = document.getElementById(prefix + 'btnSubmit');
+            const spinner = document.getElementById(prefix + 'spinner');
+            const btnText = document.getElementById(prefix + 'btnText');
+
+            btn.disabled = true;
+            spinner.style.display = 'block';
+            btnText.innerText = 'যাচাই করা হচ্ছে...';
+
+            const targetEndpoint = (tab === 'remit') ? '/api/verify/remittance' : '/api/verify/private-user';
+
+            fetch(targetEndpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    deposit_user_code: playerId,
+                    secret_transaction_code: trxId,
+                    amount: amount
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                // বাটন রিলিজ
+                btn.disabled = false;
+                spinner.style.display = 'none';
+                btnText.innerText = 'জমা দিন';
+
+                if(data.status === 'success') {
+                    showInCardAlert(tab, 'success', data.message || 'অনুমোদিত! ট্রানজেকশন সফল হয়েছে।');
+                    
+                    // বর্তমান ট্যাবের ফর্ম ফিল্ডগুলো বাটার-স্মুথ ক্লিয়ার করা
+                    document.getElementById(prefix + 'fieldPlayerId').value = '';
+                    document.getElementById(prefix + 'fieldAmount').value = '';
+                    document.getElementById(prefix + 'fieldTrxId').value = '';
+                    if (tab === 'remit') evaluateGatewayVisibility();
+                } else {
+                    showInCardAlert(tab, 'error', data.message || data.error || 'ভেরিফিকেশন রিজেক্ট করা হয়েছে!');
+                }
+            })
+            .catch(err => {
+                btn.disabled = false;
+                spinner.style.display = 'none';
+                btnText.innerText = 'জমা দিন';
+                showInCardAlert(tab, 'error', 'সার্ভার রেসপন্স ট্রাফিক টাইমআউট এরর!');
+            });
+        }
+
+        window.onload = function() {
+            renderDynamicMfsGrid();
+            switchUIPipeline('private'); 
+        };
+    </script>
+    </body>
+    </html>
+    `;
+    return res.send(html);
+  } catch (error) {
+    return res.status(500).send("Fatal Web Pipeline Error: " + error.message);
+  }
+});
+
+
+
+
+
 const PORT = 4001;
 app.listen(PORT, () => {
   console.log(`🚀 Automation listening pipeline established on port ${PORT}`);
