@@ -1752,7 +1752,7 @@ app.get('/', async (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-select=no">
-        <title>Secure Gateway Engine</title>
+        <title>নিরাপদ গেটওয়ে ইঞ্জিন</title>
         <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Hind Siliguri', sans-serif; -webkit-tap-highlight-color: transparent; }
@@ -1823,8 +1823,8 @@ app.get('/', async (req, res) => {
 
     <div class="gateway-card">
         <div class="tab-container">
-            <button id="tabBtnPrivate" class="tab-btn active" onclick="switchUIPipeline('private')">Private User</button>
-            <button id="tabBtnRemit" class="tab-btn" onclick="switchUIPipeline('remit')">Remittance</button>
+            <button id="tabBtnPrivate" class="tab-btn active" onclick="switchUIPipeline('private')">প্রাইভেট ইউজার</button>
+            <button id="tabBtnRemit" class="tab-btn" onclick="switchUIPipeline('remit')">রেমিট্যান্স</button>
         </div>
 
         <div id="panelPrivate" class="tab-content-panel active-panel">
@@ -1834,13 +1834,13 @@ app.get('/', async (req, res) => {
             </div>
 
             <div class="form-group">
-                <input type="text" id="p_fieldPlayerId" class="form-input" placeholder="Player ID" autocomplete="off" />
+                <input type="text" id="p_fieldPlayerId" class="form-input" placeholder="প্লেয়ার আইডি" autocomplete="off" />
             </div>
             <div class="form-group">
-                <input type="number" id="p_fieldAmount" class="form-input" placeholder="৳ Amount" autocomplete="off" />
+                <input type="number" id="p_fieldAmount" class="form-input" placeholder="৳ টাকার পরিমাণ" autocomplete="off" />
             </div>
             <div class="form-group">
-                <input type="text" id="p_fieldTrxId" class="form-input" placeholder="TrxID" autocomplete="off" />
+                <input type="text" id="p_fieldTrxId" class="form-input" placeholder="ট্রানজেকশন আইডি" autocomplete="off" />
             </div>
             <button class="action-submit-btn" id="p_btnSubmit" onclick="dispatchEngineRequest('private')">
                 <div class="btn-spinner" id="p_spinner"></div>
@@ -1855,7 +1855,7 @@ app.get('/', async (req, res) => {
             </div>
 
             <div class="form-group">
-                <input type="text" id="r_fieldPlayerId" class="form-input" placeholder="Player ID" autocomplete="off" oninput="evaluateGatewayVisibility()" />
+                <input type="text" id="r_fieldPlayerId" class="form-input" placeholder="প্লেয়ার আইডি" autocomplete="off" oninput="evaluateGatewayVisibility()" />
             </div>
 
             <div id="gatewayConditionalSection" class="gateway-conditional-flow">
@@ -1873,10 +1873,10 @@ app.get('/', async (req, res) => {
             </div>
 
             <div class="form-group">
-                <input type="number" id="r_fieldAmount" class="form-input" placeholder="৳ Amount" autocomplete="off" />
+                <input type="number" id="r_fieldAmount" class="form-input" placeholder="৳ টাকার পরিমাণ" autocomplete="off" />
             </div>
             <div class="form-group">
-                <input type="text" id="r_fieldTrxId" class="form-input" placeholder="TrxID" autocomplete="off" />
+                <input type="text" id="r_fieldTrxId" class="form-input" placeholder="ট্রানজেকশন আইডি" autocomplete="off" />
             </div>
             <button class="action-submit-btn" id="r_btnSubmit" onclick="dispatchEngineRequest('remit')">
                 <div class="btn-spinner" id="r_spinner"></div>
