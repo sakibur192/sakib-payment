@@ -990,9 +990,173 @@ app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
 });
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// app.post('/api/verify/private-user', async (req, res) => {
+//   try {
+//     // 🛠️ [ADDED]: Check global Gateway lifecycle availability first
+//     const gatewayCheck = await db.query(
+//       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
+//     );
+//     const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
+
+//     if (!isGatewayActive) {
+//       return res.status(403).json({ status: 'error', message: 'gateway closed' });
+//     }
+
+//     // -------------------------------------------------------------
+//     // Original untouched business logic begins here
+//     // -------------------------------------------------------------
+//     const { deposit_user_code, secret_transaction_code, amount } = req.body;
+
+//     if (!secret_transaction_code || !amount) {
+//       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
+//     }
+
+//     const privateCodeCheck = await db.query(
+//       `SELECT c.id AS code_id, u.id AS user_id, u.username
+//        FROM user_codes c
+//        JOIN users_v2 u ON c.user_id = u.id
+//        WHERE c.secret_transaction_code = $1 
+//          AND c.is_code_active = true 
+//          AND u.is_private_user = true`,
+//       [secret_transaction_code.trim()]
+//     );
+
+//     if (privateCodeCheck.rows.length === 0) {
+//       return res.status(401).json({ status: 'unauthorized', message: 'Access denied.' });
+//     }
+
+//     const { code_id, user_id, username } = privateCodeCheck.rows[0];
+//     const targetAmount = Number(amount);
+//     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+//     await db.query(
+//       `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status, action_by_username)
+//        VALUES ($1, $2, $3, $4, 'success', $5)`,
+//       [user_id, code_id, clientUserCode, targetAmount, username]
+//     );
+
+//     return res.json({
+//       status: 'success',
+//       is_vip_bypass: true,
+//       deposit_user_code: clientUserCode,
+//       amount: targetAmount
+//     });
+
+//   } catch (err) {
+//     return res.status(500).json({ error: err.message });
+//   }
+// });
+
+
+// app.post('/api/verify/remittance', async (req, res) => {
+//   try {
+//     // 🛠️ [ADDED]: Check global Gateway lifecycle availability first
+//     const gatewayCheck = await db.query(
+//       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
+//     );
+//     const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
+
+//     if (!isGatewayActive) {
+//       return res.status(403).json({ status: 'error', message: 'gateway closed' });
+//     }
+
+//     // -------------------------------------------------------------
+//     // Original untouched business logic begins here
+//     // -------------------------------------------------------------
+//     const { deposit_user_code, secret_transaction_code, amount } = req.body;
+
+//     if (!secret_transaction_code || !amount) {
+//       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
+//     }
+
+//     const codeCheck = await db.query(
+//       `SELECT c.id, u.username 
+//        FROM user_codes c
+//        JOIN users_v2 u ON c.user_id = u.id
+//        WHERE c.secret_transaction_code = $1 
+//          AND c.is_code_active = true 
+//          AND u.is_private_user = false`,
+//       [secret_transaction_code.trim()]
+//     );
+
+//     if (codeCheck.rows.length === 0) {
+//       return res.status(401).json({ status: 'error', message: 'Invalid, expired, or inactive code.' });
+//     }
+
+//     const activeCodeId = codeCheck.rows[0].id;
+//     const linkedUsername = codeCheck.rows[0].username;
+//     const targetAmount = Number(amount);
+    
+//     const smsMatch = await db.query(
+//       `SELECT id FROM remittance_sms_data 
+//        WHERE amount = $1 AND status = 'pending' 
+//        ORDER BY created_at DESC LIMIT 1`,
+//       [targetAmount]
+//     );
+
+//     if (smsMatch.rows.length === 0) {
+//       return res.status(404).json({ status: 'not_found', message: 'No live matching pending SMS found.' });
+//     }
+
+//     const matchedSms = smsMatch.rows[0];
+//     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+//     await db.query(
+//       `UPDATE remittance_sms_data 
+//        SET status = 'verified', 
+//            verified_by_code_id = $1,
+//            submitted_user_code = $2,
+//            action_by_username = $3 
+//        WHERE id = $4`, 
+//       [activeCodeId, clientUserCode, linkedUsername, matchedSms.id]
+//     );
+
+//     return res.json({
+//       status: 'success',
+//       deposit_user_code: clientUserCode,
+//       amount: targetAmount
+//     });
+
+//   } catch (err) {
+//     return res.status(500).json({ error: err.message });
+//   }
+// });
+
+
+
+
+
+
+
+
+
 app.post('/api/verify/private-user', async (req, res) => {
   try {
-    // 🛠️ [ADDED]: Check global Gateway lifecycle availability first
+    // 🛠️ Check global Gateway lifecycle availability first
     const gatewayCheck = await db.query(
       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
     );
@@ -1002,9 +1166,6 @@ app.post('/api/verify/private-user', async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'gateway closed' });
     }
 
-    // -------------------------------------------------------------
-    // Original untouched business logic begins here
-    // -------------------------------------------------------------
     const { deposit_user_code, secret_transaction_code, amount } = req.body;
 
     if (!secret_transaction_code || !amount) {
@@ -1029,20 +1190,48 @@ app.post('/api/verify/private-user', async (req, res) => {
     const targetAmount = Number(amount);
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
+    // Save transaction state to database
     await db.query(
       `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status, action_by_username)
        VALUES ($1, $2, $3, $4, 'success', $5)`,
       [user_id, code_id, clientUserCode, targetAmount, username]
     );
 
+    // 🚀 [ADDED]: Call third-party deposit service right before replying to client
+    const depositResponse = await axios.post(
+      'http://187.127.145.228:3000/deposit',
+      {
+        webUserId: clientUserCode, // Mapping the submitted user code to webUserId
+        amount: targetAmount
+      },
+      {
+        headers: {
+          'Authorization': 'Bearer your-secure-static-token-here',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    // If the integration microservice flags a dynamic issue, throw to handle gracefully
+    if (!depositResponse.data || depositResponse.data.success !== true) {
+      throw new Error(`Automation server rejected deposit hook execution workflow context`);
+    }
+
     return res.json({
       status: 'success',
       is_vip_bypass: true,
       deposit_user_code: clientUserCode,
-      amount: targetAmount
+      amount: targetAmount,
+      automation: depositResponse.data
     });
 
   } catch (err) {
+    // If axios failed with a response error code (e.g., 401, 400, 500)
+    if (err.response) {
+      return res.status(err.response.status).json({ 
+        error: `Deposit API Error: ${err.response.data?.error || err.message}` 
+      });
+    }
     return res.status(500).json({ error: err.message });
   }
 });
@@ -1050,7 +1239,7 @@ app.post('/api/verify/private-user', async (req, res) => {
 
 app.post('/api/verify/remittance', async (req, res) => {
   try {
-    // 🛠️ [ADDED]: Check global Gateway lifecycle availability first
+    // 🛠️ Check global Gateway lifecycle availability first
     const gatewayCheck = await db.query(
       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
     );
@@ -1060,9 +1249,6 @@ app.post('/api/verify/remittance', async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'gateway closed' });
     }
 
-    // -------------------------------------------------------------
-    // Original untouched business logic begins here
-    // -------------------------------------------------------------
     const { deposit_user_code, secret_transaction_code, amount } = req.body;
 
     if (!secret_transaction_code || !amount) {
@@ -1101,6 +1287,7 @@ app.post('/api/verify/remittance', async (req, res) => {
     const matchedSms = smsMatch.rows[0];
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
+    // Mutate internal record to verified status
     await db.query(
       `UPDATE remittance_sms_data 
        SET status = 'verified', 
@@ -1111,16 +1298,53 @@ app.post('/api/verify/remittance', async (req, res) => {
       [activeCodeId, clientUserCode, linkedUsername, matchedSms.id]
     );
 
+    // 🚀 [ADDED]: Call third-party deposit service right before replying to client
+    const depositResponse = await axios.post(
+      'http://187.127.145.228:3000/deposit',
+      {
+        webUserId: clientUserCode, // Mapping the submitted user code to webUserId
+        amount: targetAmount
+      },
+      {
+        headers: {
+          'Authorization': 'Bearer your-secure-static-token-here',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    // If the integration microservice flags a dynamic issue, throw to handle gracefully
+    if (!depositResponse.data || depositResponse.data.success !== true) {
+      throw new Error(`Automation server rejected deposit hook execution workflow context`);
+    }
+
     return res.json({
       status: 'success',
       deposit_user_code: clientUserCode,
-      amount: targetAmount
+      amount: targetAmount,
+      automation: depositResponse.data
     });
 
   } catch (err) {
+    // If axios failed with a response error code (e.g., 401, 400, 500)
+    if (err.response) {
+      return res.status(err.response.status).json({ 
+        error: `Deposit API Error: ${err.response.data?.error || err.message}` 
+      });
+    }
     return res.status(500).json({ error: err.message });
   }
 });
+
+
+
+
+
+
+
+
+
+
 
 
 
