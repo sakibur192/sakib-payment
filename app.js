@@ -1188,7 +1188,56 @@ app.post('/api/admin/gateway/update-number', async (req, res) => {
 // =========================================================
 
 
+// ৩. ইউজারের ভিআইপি (Private User) স্ট্যাটাস অন/অফ (Toggle) করা
+app.post('/api/admin/users/toggle-vip-status', async (req, res) => {
+  try {
+    const { user_id, is_vip } = req.body; //is_vip: true/false
 
+    // রিকোয়েস্ট ভ্যালিডেশন
+    if (user_id === undefined || is_vip === undefined) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "Missing required fields: user_id and is_vip are mandatory." 
+      });
+    }
+
+    // ১. ইউজারটি ডাটাবেজে এক্সিস্ট করে কি না তা চেক করা
+    const userCheck = await db.query('SELECT id, username FROM users_v2 WHERE id = $1', [user_id]);
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: "User profile not found." 
+      });
+    }
+
+    const userName = userCheck.rows[0].username;
+
+    // ২. users_v2 টেবিলে ওই ইউজারের is_private_user ফিল্ডটি আপডেট করা
+    await db.query(
+      `UPDATE users_v2 SET is_private_user = $1 WHERE id = $2`,
+      [is_vip, user_id]
+    );
+
+    console.log(`💎 [VIP TOGGLE]: User '${userName}' (ID: ${user_id}) VIP status updated to ${is_vip}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `User VIP status successfully updated to ${is_vip}`,
+      updated_user: {
+        id: user_id,
+        username: userName,
+        is_private_user: is_vip
+      }
+    });
+
+  } catch (err) {
+    console.error('❌ VIP toggle operation failed:', err);
+    return res.status(500).json({ 
+      success: false, 
+      error: err.message 
+    });
+  }
+});
 
 // =========================================================
 // 🌐 [CORE ROOT ROUTE]: ইন-কার্ড নোটিফিকেশন ও আইসোলেটেড ট্যাব ইঞ্জিন (/)
