@@ -1537,7 +1537,56 @@ app.get('/api/admin/private/history-user/:userId', async (req, res) => {
 
 
 
+app.get('/api/admin/private/total/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
 
+    const result = await db.query(`
+      SELECT
+        COALESCE(SUM(amount), 0) AS total_amount,
+        COUNT(*) AS total_transactions
+      FROM private_user_transactions
+      WHERE user_id = $1
+    `, [userId]);
+
+    return res.json({
+      success: true,
+      user_id: userId,
+      total_amount: Number(result.rows[0].total_amount),
+      total_transactions: Number(result.rows[0].total_transactions)
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+app.post('/api/admin/private/reset-total/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const result = await db.query(
+      `DELETE FROM private_user_transactions
+       WHERE user_id = $1`,
+      [userId]
+    );
+
+    return res.json({
+      success: true,
+      message: "Private user total reset successfully.",
+      deleted_transactions: result.rowCount
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
 
 
 
