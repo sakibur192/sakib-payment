@@ -804,6 +804,42 @@ app.post('/api/admin/codes/toggle-status', async (req, res) => {
 // =========================================================================
 
 // ৩. অ্যান্ড্রয়েড অ্যাপ থেকে আসা রেমিটেন্স এসএমএস স্টোর করার রাউট
+
+
+// app.post('/sms-rem', async (req, res) => {
+//   try {
+//     // Extract what Kotlin is actually sending (sender and amount)
+//     const { sender, amount } = req.body;
+
+//     // Use sender as the sms_body text content
+//     const sms_body = sender;
+
+//     if (!sms_body || !amount) {
+//       return res.status(400).json({ 
+//         error: "sender (as sms_body) and amount are strictly required." 
+//       });
+//     }
+
+//     // রেমিটেন্স ডাটাবেসে সম্পূর্ণ মেসেজ ও অ্যামাউন্ট pending হিসেবে জমা হবে
+//     const result = await db.query(
+//       `INSERT INTO remittance_sms_data (sms_body, amount, status) 
+//        VALUES ($1, $2, 'pending') 
+//        RETURNING *`,
+//       [sms_body, Number(amount)]
+//     );
+
+//     return res.json({ 
+//       status: 'inserted', 
+//       message: 'Remittance SMS logged successfully.',
+//       data: result.rows[0] 
+//     });
+//   } catch (err) {
+//     return res.status(500).json({ error: err.message });
+//   }
+// });
+
+
+
 app.post('/sms-rem', async (req, res) => {
   try {
     // Extract what Kotlin is actually sending (sender and amount)
@@ -815,6 +851,16 @@ app.post('/sms-rem', async (req, res) => {
     if (!sms_body || !amount) {
       return res.status(400).json({ 
         error: "sender (as sms_body) and amount are strictly required." 
+      });
+    }
+
+    // 🔒 SAFE CASE VALIDATION: Lowercase the text and check for authentic provider keyword
+    const normalizedSmsBody = sms_body.toLowerCase();
+    const isValidProvider = normalizedSmsBody.includes('bkash') || normalizedSmsBody.includes('nagad');
+
+    if (!isValidProvider) {
+      return res.status(400).json({
+        error: "Security validation failed: Sender message does not contain a recognized mobile banking signature."
       });
     }
 
