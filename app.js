@@ -845,68 +845,68 @@ app.post('/sms-rem', async (req, res) => {
 // =========================================================================
 // 🌍 USER END: WEBSITE VERIFICATION GATEWAY (SECURE ID BYPASS)
 // =========================================================================
-app.post('/api/verify/remittance', async (req, res) => {
-  try {
-    const { deposit_user_code, secret_transaction_code, amount } = req.body;
+// app.post('/api/verify/remittance', async (req, res) => {
+//   try {
+//     const { deposit_user_code, secret_transaction_code, amount } = req.body;
 
-    if (!secret_transaction_code || !amount) {
-      return res.status(400).json({ error: "secret_transaction_code and amount are required." });
-    }
+//     if (!secret_transaction_code || !amount) {
+//       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
+//     }
 
-    // 🎯 Capturing the username linked to the code right here
-    const codeCheck = await db.query(
-      `SELECT c.id, u.username 
-       FROM user_codes c
-       JOIN users_v2 u ON c.user_id = u.id
-       WHERE c.secret_transaction_code = $1 
-         AND c.is_code_active = true 
-         AND u.is_private_user = false`,
-      [secret_transaction_code.trim()]
-    );
+//     // 🎯 Capturing the username linked to the code right here
+//     const codeCheck = await db.query(
+//       `SELECT c.id, u.username 
+//        FROM user_codes c
+//        JOIN users_v2 u ON c.user_id = u.id
+//        WHERE c.secret_transaction_code = $1 
+//          AND c.is_code_active = true 
+//          AND u.is_private_user = false`,
+//       [secret_transaction_code.trim()]
+//     );
 
-    if (codeCheck.rows.length === 0) {
-      return res.status(401).json({ status: 'error', message: 'Invalid, expired, or inactive code.' });
-    }
+//     if (codeCheck.rows.length === 0) {
+//       return res.status(401).json({ status: 'error', message: 'Invalid, expired, or inactive code.' });
+//     }
 
-    const activeCodeId = codeCheck.rows[0].id;
-    const linkedUsername = codeCheck.rows[0].username; // 👈 Storing username in memory
-    const targetAmount = Number(amount);
+//     const activeCodeId = codeCheck.rows[0].id;
+//     const linkedUsername = codeCheck.rows[0].username; // 👈 Storing username in memory
+//     const targetAmount = Number(amount);
     
-    const smsMatch = await db.query(
-      `SELECT id FROM remittance_sms_data 
-       WHERE amount = $1 AND status = 'pending' 
-       ORDER BY created_at DESC LIMIT 1`,
-      [targetAmount]
-    );
+//     const smsMatch = await db.query(
+//       `SELECT id FROM remittance_sms_data 
+//        WHERE amount = $1 AND status = 'pending' 
+//        ORDER BY created_at DESC LIMIT 1`,
+//       [targetAmount]
+//     );
 
-    if (smsMatch.rows.length === 0) {
-      return res.status(404).json({ status: 'not_found', message: 'No live matching pending SMS found.' });
-    }
+//     if (smsMatch.rows.length === 0) {
+//       return res.status(404).json({ status: 'not_found', message: 'No live matching pending SMS found.' });
+//     }
 
-    const matchedSms = smsMatch.rows[0];
-    const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+//     const matchedSms = smsMatch.rows[0];
+//     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
-    // 🔒 [UPDATED]: Saving 'linkedUsername' directly into the row permanently
-    await db.query(
-      `UPDATE remittance_sms_data 
-       SET status = 'verified', 
-           verified_by_code_id = $1,
-           submitted_user_code = $2,
-           action_by_username = $3 
-       WHERE id = $4`, 
-      [activeCodeId, clientUserCode, linkedUsername, matchedSms.id]
-    );
+//     // 🔒 [UPDATED]: Saving 'linkedUsername' directly into the row permanently
+//     await db.query(
+//       `UPDATE remittance_sms_data 
+//        SET status = 'verified', 
+//            verified_by_code_id = $1,
+//            submitted_user_code = $2,
+//            action_by_username = $3 
+//        WHERE id = $4`, 
+//       [activeCodeId, clientUserCode, linkedUsername, matchedSms.id]
+//     );
 
-    return res.json({
-      status: 'success',
-      deposit_user_code: clientUserCode,
-      amount: targetAmount
-    });
+//     return res.json({
+//       status: 'success',
+//       deposit_user_code: clientUserCode,
+//       amount: targetAmount
+//     });
 
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+//   } catch (err) {
+//     return res.status(500).json({ error: err.message });
+//   }
+// });
 
 
 // =========================================================================
@@ -990,12 +990,21 @@ app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
 });
 
 
-
-
-
-
 app.post('/api/verify/private-user', async (req, res) => {
   try {
+    // 🛠️ [ADDED]: Check global Gateway lifecycle availability first
+    const gatewayCheck = await db.query(
+      "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
+    );
+    const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
+
+    if (!isGatewayActive) {
+      return res.status(403).json({ status: 'error', message: 'gateway closed' });
+    }
+
+    // -------------------------------------------------------------
+    // Original untouched business logic begins here
+    // -------------------------------------------------------------
     const { deposit_user_code, secret_transaction_code, amount } = req.body;
 
     if (!secret_transaction_code || !amount) {
@@ -1020,7 +1029,6 @@ app.post('/api/verify/private-user', async (req, res) => {
     const targetAmount = Number(amount);
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
-    // 🔒 [UPDATED]: Inserting 'username' explicitly inside your transaction history table
     await db.query(
       `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status, action_by_username)
        VALUES ($1, $2, $3, $4, 'success', $5)`,
@@ -1038,6 +1046,128 @@ app.post('/api/verify/private-user', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+
+app.post('/api/verify/remittance', async (req, res) => {
+  try {
+    // 🛠️ [ADDED]: Check global Gateway lifecycle availability first
+    const gatewayCheck = await db.query(
+      "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
+    );
+    const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
+
+    if (!isGatewayActive) {
+      return res.status(403).json({ status: 'error', message: 'gateway closed' });
+    }
+
+    // -------------------------------------------------------------
+    // Original untouched business logic begins here
+    // -------------------------------------------------------------
+    const { deposit_user_code, secret_transaction_code, amount } = req.body;
+
+    if (!secret_transaction_code || !amount) {
+      return res.status(400).json({ error: "secret_transaction_code and amount are required." });
+    }
+
+    const codeCheck = await db.query(
+      `SELECT c.id, u.username 
+       FROM user_codes c
+       JOIN users_v2 u ON c.user_id = u.id
+       WHERE c.secret_transaction_code = $1 
+         AND c.is_code_active = true 
+         AND u.is_private_user = false`,
+      [secret_transaction_code.trim()]
+    );
+
+    if (codeCheck.rows.length === 0) {
+      return res.status(401).json({ status: 'error', message: 'Invalid, expired, or inactive code.' });
+    }
+
+    const activeCodeId = codeCheck.rows[0].id;
+    const linkedUsername = codeCheck.rows[0].username;
+    const targetAmount = Number(amount);
+    
+    const smsMatch = await db.query(
+      `SELECT id FROM remittance_sms_data 
+       WHERE amount = $1 AND status = 'pending' 
+       ORDER BY created_at DESC LIMIT 1`,
+      [targetAmount]
+    );
+
+    if (smsMatch.rows.length === 0) {
+      return res.status(404).json({ status: 'not_found', message: 'No live matching pending SMS found.' });
+    }
+
+    const matchedSms = smsMatch.rows[0];
+    const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+    await db.query(
+      `UPDATE remittance_sms_data 
+       SET status = 'verified', 
+           verified_by_code_id = $1,
+           submitted_user_code = $2,
+           action_by_username = $3 
+       WHERE id = $4`, 
+      [activeCodeId, clientUserCode, linkedUsername, matchedSms.id]
+    );
+
+    return res.json({
+      status: 'success',
+      deposit_user_code: clientUserCode,
+      amount: targetAmount
+    });
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+// app.post('/api/verify/private-user', async (req, res) => {
+//   try {
+//     const { deposit_user_code, secret_transaction_code, amount } = req.body;
+
+//     if (!secret_transaction_code || !amount) {
+//       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
+//     }
+
+//     const privateCodeCheck = await db.query(
+//       `SELECT c.id AS code_id, u.id AS user_id, u.username
+//        FROM user_codes c
+//        JOIN users_v2 u ON c.user_id = u.id
+//        WHERE c.secret_transaction_code = $1 
+//          AND c.is_code_active = true 
+//          AND u.is_private_user = true`,
+//       [secret_transaction_code.trim()]
+//     );
+
+//     if (privateCodeCheck.rows.length === 0) {
+//       return res.status(401).json({ status: 'unauthorized', message: 'Access denied.' });
+//     }
+
+//     const { code_id, user_id, username } = privateCodeCheck.rows[0];
+//     const targetAmount = Number(amount);
+//     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+//     // 🔒 [UPDATED]: Inserting 'username' explicitly inside your transaction history table
+//     await db.query(
+//       `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status, action_by_username)
+//        VALUES ($1, $2, $3, $4, 'success', $5)`,
+//       [user_id, code_id, clientUserCode, targetAmount, username]
+//     );
+
+//     return res.json({
+//       status: 'success',
+//       is_vip_bypass: true,
+//       deposit_user_code: clientUserCode,
+//       amount: targetAmount
+//     });
+
+//   } catch (err) {
+//     return res.status(500).json({ error: err.message });
+//   }
+// });
 
 
 
@@ -1601,6 +1731,85 @@ app.get('/', async (req, res) => {
 
 
 
+// const initDb = async () => {
+//   const createTableQuery = `
+//     CREATE TABLE IF NOT EXISTS system_configs (
+//         config_key VARCHAR(255) PRIMARY KEY,
+//         config_value VARCHAR(255) NOT NULL DEFAULT 'inactive',
+//         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+//     );
+//   `;
+  
+//   const insertInitialConfig = `
+//     INSERT INTO system_configs (config_key, config_value) 
+//     VALUES ('version2gateway_active', 'inactive')
+//     ON CONFLICT (config_key) DO NOTHING;
+//   `;
+
+//   try {
+//     await db.query(createTableQuery);
+//     await db.query(insertInitialConfig);
+//     console.log("Database configuration schema verified.");
+//   } catch (err) {
+//     console.error("Database initialization failed:", err.message);
+//   }
+// };
+
+// // Call this during your application server boot sequence
+// initDb();
+
+
+// GET: Fetch current state to sync the switch visual layout when app starts
+app.get('/api/admin/config/gateway-status', async (req, res) => {
+  try {
+    const queryStr = "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';";
+    const result = await db.query(queryStr);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Configuration key target missing" });
+    }
+    
+    // Convert 'active' string state to true, and 'inactive' to false for the Android UI
+    const isGatewayActive = result.rows[0].config_value === 'active';
+    
+    return res.status(200).json({ 
+      success: true, 
+      is_active: isGatewayActive 
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST: Handles mutation when user physically clicks the SwitchCompat widget
+app.post('/api/admin/config/toggle-gateway', async (req, res) => {
+  try {
+    const { target_status } = req.body; // Expects a boolean: true or false from Retrofit
+
+    if (target_status === undefined) {
+      return res.status(400).json({ success: false, error: "Missing required property: target_status" });
+    }
+
+    // Map boolean value back into string tokens matching your column requirements
+    const mappedStringState = target_status ? 'active' : 'inactive';
+
+    const updateQuery = `
+      INSERT INTO system_configs (config_key, config_value, updated_at)
+      VALUES ('version2gateway_active', $1, CURRENT_TIMESTAMP)
+      ON CONFLICT (config_key) 
+      DO UPDATE SET config_value = EXCLUDED.config_value, updated_at = CURRENT_TIMESTAMP;
+    `;
+
+    await db.query(updateQuery, [mappedStringState]);
+
+    return res.status(200).json({ 
+      success: true, 
+      message: `Gateway status successfully changed to ${mappedStringState}` 
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 const PORT = 4001;
 app.listen(PORT, () => {
   console.log(`🚀 Automation listening pipeline established on port ${PORT}`);
