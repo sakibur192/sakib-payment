@@ -1152,12 +1152,12 @@ app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
 
 
 
-
-
 app.post('/api/verify/private-user', async (req, res) => {
+  // Start a transaction client from the pool
+  const client = await db.connect();
   try {
     // 🛠️ Check global Gateway lifecycle availability first
-    const gatewayCheck = await db.query(
+    const gatewayCheck = await client.query(
       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
     );
     const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
@@ -1172,7 +1172,7 @@ app.post('/api/verify/private-user', async (req, res) => {
       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
     }
 
-    const privateCodeCheck = await db.query(
+    const privateCodeCheck = await client.query(
       `SELECT c.id AS code_id, u.id AS user_id, u.username
        FROM user_codes c
        JOIN users_v2 u ON c.user_id = u.id
@@ -1190,32 +1190,39 @@ app.post('/api/verify/private-user', async (req, res) => {
     const targetAmount = Number(amount);
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
-    // Save transaction state to database
-    await db.query(
+    // --- START TRANSACTION ---
+    await client.query('BEGIN');
+
+    // Insert transaction state provisionally
+    await client.query(
       `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status, action_by_username)
        VALUES ($1, $2, $3, $4, 'success', $5)`,
       [user_id, code_id, clientUserCode, targetAmount, username]
     );
 
-    // 🚀 [ADDED]: Call third-party deposit service right before replying to client
+    // 🚀 Call third-party deposit service while DB changes are pending
     const depositResponse = await axios.post(
       'http://187.127.145.228:3000/deposit',
       {
-        webUserId: clientUserCode, // Mapping the submitted user code to webUserId
+        webUserId: clientUserCode,
         amount: targetAmount
       },
       {
         headers: {
           'Authorization': 'Bearer your-secure-static-token-here',
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 8000 // Prevent hanging if third-party server goes silent
       }
     );
 
-    // If the integration microservice flags a dynamic issue, throw to handle gracefully
+    // Check if third-party application internal validation failed
     if (!depositResponse.data || depositResponse.data.success !== true) {
-      throw new Error(`Automation server rejected deposit hook execution workflow context`);
+      throw new Error(`Automation server rejected deposit hook execution`);
     }
+
+    // --- COMMIT BOTH IF EVERYTHING IS SUCCESSFUL ---
+    await client.query('COMMIT');
 
     return res.json({
       status: 'success',
@@ -1226,21 +1233,26 @@ app.post('/api/verify/private-user', async (req, res) => {
     });
 
   } catch (err) {
-    // If axios failed with a response error code (e.g., 401, 400, 500)
+    // Roll back database changes if an error occurred after 'BEGIN'
+    await client.query('ROLLBACK').catch(() => {}); 
+    
     if (err.response) {
       return res.status(err.response.status).json({ 
         error: `Deposit Failed.. Player ID wrong!! Contact With Admin` 
       });
     }
     return res.status(500).json({ error: err.message });
+  } finally {
+    client.release(); // Always return client connection back to pool
   }
 });
 
 
 app.post('/api/verify/remittance', async (req, res) => {
+  const client = await db.connect();
   try {
     // 🛠️ Check global Gateway lifecycle availability first
-    const gatewayCheck = await db.query(
+    const gatewayCheck = await client.query(
       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
     );
     const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
@@ -1255,7 +1267,7 @@ app.post('/api/verify/remittance', async (req, res) => {
       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
     }
 
-    const codeCheck = await db.query(
+    const codeCheck = await client.query(
       `SELECT c.id, u.username 
        FROM user_codes c
        JOIN users_v2 u ON c.user_id = u.id
@@ -1273,7 +1285,7 @@ app.post('/api/verify/remittance', async (req, res) => {
     const linkedUsername = codeCheck.rows[0].username;
     const targetAmount = Number(amount);
     
-    const smsMatch = await db.query(
+    const smsMatch = await client.query(
       `SELECT id FROM remittance_sms_data 
        WHERE amount = $1 AND status = 'pending' 
        ORDER BY created_at DESC LIMIT 1`,
@@ -1287,8 +1299,11 @@ app.post('/api/verify/remittance', async (req, res) => {
     const matchedSms = smsMatch.rows[0];
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
-    // Mutate internal record to verified status
-    await db.query(
+    // --- START TRANSACTION ---
+    await client.query('BEGIN');
+
+    // Mutate internal record to verified status provisionally
+    await client.query(
       `UPDATE remittance_sms_data 
        SET status = 'verified', 
            verified_by_code_id = $1,
@@ -1298,25 +1313,29 @@ app.post('/api/verify/remittance', async (req, res) => {
       [activeCodeId, clientUserCode, linkedUsername, matchedSms.id]
     );
 
-    // 🚀 [ADDED]: Call third-party deposit service right before replying to client
+    // 🚀 Call third-party deposit service while DB status change is isolated
     const depositResponse = await axios.post(
       'http://187.127.145.228:3000/deposit',
       {
-        webUserId: clientUserCode, // Mapping the submitted user code to webUserId
+        webUserId: clientUserCode,
         amount: targetAmount
       },
       {
         headers: {
           'Authorization': 'Bearer your-secure-static-token-here',
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 8000
       }
     );
 
-    // If the integration microservice flags a dynamic issue, throw to handle gracefully
+    // Check if third-party application internal validation failed
     if (!depositResponse.data || depositResponse.data.success !== true) {
-      throw new Error(`Automation server rejected deposit hook execution workflow context`);
+      throw new Error(`Automation server rejected deposit hook execution`);
     }
+
+    // --- COMMIT BOTH IF EVERYTHING IS SUCCESSFUL ---
+    await client.query('COMMIT');
 
     return res.json({
       status: 'success',
@@ -1326,13 +1345,17 @@ app.post('/api/verify/remittance', async (req, res) => {
     });
 
   } catch (err) {
-    // If axios failed with a response error code (e.g., 401, 400, 500)
+    // Roll back database mutations if third-party API or network breaks down
+    await client.query('ROLLBACK').catch(() => {}); 
+
     if (err.response) {
       return res.status(err.response.status).json({ 
        error: `Deposit Failed.. Player ID wrong!! Contact With Admin`  
       });
     }
     return res.status(500).json({ error: err.message });
+  } finally {
+    client.release(); // Always return client connection back to pool
   }
 });
 
