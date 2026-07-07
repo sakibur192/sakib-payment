@@ -1229,7 +1229,7 @@ app.post('/api/verify/private-user', async (req, res) => {
     // If axios failed with a response error code (e.g., 401, 400, 500)
     if (err.response) {
       return res.status(err.response.status).json({ 
-        error: `Deposit API Error: ${err.response.data?.error || err.message}` 
+        error: `Deposit Failed.. Player ID wrong!! Contact With Admin` 
       });
     }
     return res.status(500).json({ error: err.message });
@@ -1329,7 +1329,7 @@ app.post('/api/verify/remittance', async (req, res) => {
     // If axios failed with a response error code (e.g., 401, 400, 500)
     if (err.response) {
       return res.status(err.response.status).json({ 
-        error: `Deposit API Error: ${err.response.data?.error || err.message}` 
+       error: `Deposit Failed.. Player ID wrong!! Contact With Admin`  
       });
     }
     return res.status(500).json({ error: err.message });
