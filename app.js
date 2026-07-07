@@ -1293,7 +1293,7 @@ app.post('/api/verify/remittance', async (req, res) => {
     );
 
     if (smsMatch.rows.length === 0) {
-      return res.status(404).json({ status: 'not_found', message: 'No live matching pending SMS found.' });
+      return res.status(404).json({ status: 'not_found', message: 'Please deposit the amount first or recheck the amount you entered.' });
     }
 
     const matchedSms = smsMatch.rows[0];
