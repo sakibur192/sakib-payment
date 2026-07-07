@@ -658,6 +658,33 @@ await db.query(`
   }
 });
 
+app.get('/api/migrate/add-username-tracking', async (req, res) => {
+  try {
+    console.log("⚙️ Patching tables for explicit username tracking...");
+
+    // 1. Add column to Remittance table
+    await db.query(`
+      ALTER TABLE remittance_sms_data 
+      ADD COLUMN IF NOT EXISTS action_by_username VARCHAR(100);
+    `);
+
+    // 2. Add column to Private/VIP Ledger table
+    await db.query(`
+      ALTER TABLE private_user_transactions 
+      ADD COLUMN IF NOT EXISTS action_by_username VARCHAR(100);
+    `);
+
+    return res.status(200).json({
+      success: true,
+      message: "Database patched! 'action_by_username' column added to tracking tables."
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+
 // =========================================================================
 // 👑 ADMIN PANEL: USER & CODE MANAGER (For Remittance)
 // =========================================================================
@@ -818,20 +845,17 @@ app.post('/sms-rem', async (req, res) => {
 // =========================================================================
 // 🌍 USER END: WEBSITE VERIFICATION GATEWAY (SECURE ID BYPASS)
 // =========================================================================
-
 app.post('/api/verify/remittance', async (req, res) => {
   try {
     const { deposit_user_code, secret_transaction_code, amount } = req.body;
 
-    // ভ্যালিডেশন চেক
     if (!secret_transaction_code || !amount) {
       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
     }
 
-    // 🎯 [RULE]: deposit_user_code ডাটাবেসে চেক করা হবে না। 
-    // কেবল চেক করা হবে এই secret_transaction_code-টি সিস্টেমে বর্তমানে ACTIVE আছে কি না।
+    // 🎯 Capturing the username linked to the code right here
     const codeCheck = await db.query(
-      `SELECT c.*, u.is_private_user 
+      `SELECT c.id, u.username 
        FROM user_codes c
        JOIN users_v2 u ON c.user_id = u.id
        WHERE c.secret_transaction_code = $1 
@@ -841,45 +865,38 @@ app.post('/api/verify/remittance', async (req, res) => {
     );
 
     if (codeCheck.rows.length === 0) {
-      return res.status(401).json({ 
-        status: 'error', 
-        message: 'Invalid, expired, or inactive remittance transaction code.' 
-      });
+      return res.status(401).json({ status: 'error', message: 'Invalid, expired, or inactive code.' });
     }
 
     const activeCodeId = codeCheck.rows[0].id;
+    const linkedUsername = codeCheck.rows[0].username; // 👈 Storing username in memory
     const targetAmount = Number(amount);
     
-    // /sms-rem (remittance_sms_data) টেবিল থেকে কাস্টমারের সাবমিট করা অ্যামাউন্টের সাথে pending মেসেজ ম্যাচ করা
     const smsMatch = await db.query(
-      `SELECT * FROM remittance_sms_data 
+      `SELECT id FROM remittance_sms_data 
        WHERE amount = $1 AND status = 'pending' 
        ORDER BY created_at DESC LIMIT 1`,
       [targetAmount]
     );
 
     if (smsMatch.rows.length === 0) {
-      return res.status(404).json({ 
-        status: 'not_found', 
-        message: 'No live matching pending remittance SMS found for this amount.' 
-      });
+      return res.status(404).json({ status: 'not_found', message: 'No live matching pending SMS found.' });
     }
 
     const matchedSms = smsMatch.rows[0];
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
-    // 🔒 [UPDATED]: এখন status ও verified_by_code_id এর পাশাপাশি 
-    // কাস্টমারের সাবমিট করা deposit_user_code ও ডাটাবেসে স্থায়ীভাবে সেভ হবে।
+    // 🔒 [UPDATED]: Saving 'linkedUsername' directly into the row permanently
     await db.query(
       `UPDATE remittance_sms_data 
        SET status = 'verified', 
            verified_by_code_id = $1,
-           submitted_user_code = $2 
-       WHERE id = $3`, 
-      [activeCodeId, clientUserCode, matchedSms.id]
+           submitted_user_code = $2,
+           action_by_username = $3 
+       WHERE id = $4`, 
+      [activeCodeId, clientUserCode, linkedUsername, matchedSms.id]
     );
 
-    // 🎯 সাকসেস রেসপন্স: আগের মতোই কাস্টমারের পাঠানো আইডিটি সরাসরি রিটার্ন করা হচ্ছে
     return res.json({
       status: 'success',
       deposit_user_code: clientUserCode,
@@ -897,6 +914,9 @@ app.post('/api/verify/remittance', async (req, res) => {
 // =========================================================================
 
 // ১. টোটাল রেমিটেন্স হিস্টোরি (সব সাকসেস এবং পেন্ডিং ট্রানজেকশন একসঙ্গে)
+
+
+// ১. টোটাল রেমিটেন্স হিস্টোরি (সব সাকসেস এবং পেন্ডিং ট্রানজেকশন একসঙ্গে)
 app.get('/api/admin/remittance/history-all', async (req, res) => {
   try {
     const query = `
@@ -905,7 +925,8 @@ app.get('/api/admin/remittance/history-all', async (req, res) => {
         r.sms_body,
         r.amount,
         r.status,
-        r.submitted_user_code AS claimed_by_player_id, -- 🎯 [NEW]: কাস্টমার যে আইডি ইনপুট দিয়েছিল
+        r.submitted_user_code AS claimed_by_player_id, 
+        r.action_by_username AS executed_by_username, -- 🎯 [NEW]: Explicitly pulled from your saved table row
         r.created_at AS sms_received_at,
         u.username AS admin_configured_user,
         c.secret_transaction_code AS used_secret_code
@@ -929,19 +950,19 @@ app.get('/api/admin/remittance/history-all', async (req, res) => {
 // ২. ইউজারভিত্তিক রেমিটেন্স হিস্টোরি (নির্দিষ্ট কোনো ইউজারের সমস্ত সফল ট্রানজেকশন)
 // এখানে URL এ ইউজারের unique id বা username পাস করতে হবে (উদা: /api/admin/remittance/history-user/1)
 
-
+// ২. ইউজারভিত্তিক রেমিটেন্স হিস্টোরি (নির্দিষ্ট কোনো ইউজারের সমস্ত সফল ট্রানজেকশন)
 app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
 
-    // 🎯 UPDATE: কুয়েরিতে r.submitted_user_code কলামটি যুক্ত করা হয়েছে
     const query = `
       SELECT 
         r.id AS transaction_id,
         r.sms_body,
         r.amount,
         r.status,
-        r.submitted_user_code AS claimed_by_player_id, -- কাস্টমার যে আইডি ইনপুট দিয়েছিল
+        r.submitted_user_code AS claimed_by_player_id, 
+        r.action_by_username AS executed_by_username, -- 🎯 [NEW]: Explicitly pulled from row data
         r.created_at AS processed_at,
         c.secret_transaction_code AS used_secret_code
       FROM remittance_sms_data r
@@ -951,8 +972,6 @@ app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
     `;
 
     const result = await db.query(query, [userId]);
-    
-    // ইউজারের নাম আলাদাভাবে জানার জন্য
     const userCheck = await db.query('SELECT username, deposit_user_code FROM users_v2 WHERE id = $1', [userId]);
     
     if (userCheck.rows.length === 0) {
@@ -975,7 +994,6 @@ app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
 
 
 
-
 app.post('/api/verify/private-user', async (req, res) => {
   try {
     const { deposit_user_code, secret_transaction_code, amount } = req.body;
@@ -984,7 +1002,6 @@ app.post('/api/verify/private-user', async (req, res) => {
       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
     }
 
-    // ১. চেক করা: কোডটি ACTIVE এবং PRIVATE USER এর কি না
     const privateCodeCheck = await db.query(
       `SELECT c.id AS code_id, u.id AS user_id, u.username
        FROM user_codes c
@@ -996,24 +1013,19 @@ app.post('/api/verify/private-user', async (req, res) => {
     );
 
     if (privateCodeCheck.rows.length === 0) {
-      return res.status(401).json({
-        status: 'unauthorized',
-        message: 'Access denied. Secret code is invalid or unauthorized for Private User bypass.'
-      });
+      return res.status(401).json({ status: 'unauthorized', message: 'Access denied.' });
     }
 
     const { code_id, user_id, username } = privateCodeCheck.rows[0];
     const targetAmount = Number(amount);
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
-    // 🔒 [NEW TRACKING STEP]: সফল ট্রানজেকশনটি লেজার টেবিলে স্থায়ীভাবে সেভ করা
+    // 🔒 [UPDATED]: Inserting 'username' explicitly inside your transaction history table
     await db.query(
-      `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status)
-       VALUES ($1, $2, $3, $4, 'success')`,
-      [user_id, code_id, clientUserCode, targetAmount]
+      `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status, action_by_username)
+       VALUES ($1, $2, $3, $4, 'success', $5)`,
+      [user_id, code_id, clientUserCode, targetAmount, username]
     );
-
-    console.log(`💎 [VIP BYPASS LOGGED]: Approved and recorded for Admin '${username}' -> Player '${clientUserCode}'`);
 
     return res.json({
       status: 'success',
@@ -1038,7 +1050,8 @@ app.get('/api/admin/private/history-all', async (req, res) => {
         p.id AS transaction_id,
         p.amount,
         p.status,
-        p.submitted_user_code AS claimed_by_player_id, -- কাস্টমারের ইনপুট দেওয়া প্লেয়ার আইডি
+        p.submitted_user_code AS claimed_by_player_id, 
+        p.action_by_username AS executed_by_username, -- 🎯 [NEW]: From your explicit database column
         p.created_at AS processed_at,
         u.username AS admin_configured_user,
         c.secret_transaction_code AS used_secret_code
@@ -1071,6 +1084,7 @@ app.get('/api/admin/private/history-user/:userId', async (req, res) => {
         p.amount,
         p.status,
         p.submitted_user_code AS claimed_by_player_id,
+        p.action_by_username AS executed_by_username, -- 🎯 [NEW]: From your explicit database column
         p.created_at AS processed_at,
         c.secret_transaction_code AS used_secret_code
       FROM private_user_transactions p
@@ -1080,8 +1094,6 @@ app.get('/api/admin/private/history-user/:userId', async (req, res) => {
     `;
 
     const result = await db.query(query, [userId]);
-    
-    // ইউজারের ডাটা চেক
     const userCheck = await db.query('SELECT username, deposit_user_code FROM users_v2 WHERE id = $1 AND is_private_user = true', [userId]);
     
     if (userCheck.rows.length === 0) {
