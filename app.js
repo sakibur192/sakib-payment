@@ -13,6 +13,64 @@ app.use((req, res, next) => {
   next();
 });
 
+app.post("/migration/fix-sms-data-error", async (req, res) => {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Drop any background triggers attached to 'sms_data' causing internal crashes
+    await client.query(`
+      DO $$ 
+      DECLARE 
+        trg RECORD;
+      BEGIN
+        FOR trg IN 
+          SELECT trigger_name 
+          FROM information_schema.triggers 
+          WHERE event_object_table = 'sms_data'
+        LOOP
+          EXECUTE format('DROP TRIGGER IF EXISTS %I ON sms_data CASCADE;', trg.trigger_name);
+        END LOOP;
+      END $$;
+    `);
+
+    // 2. Safely ensure 'submitted_user_code' exists as a fallback column on 'sms_data'
+    await client.query(`
+      ALTER TABLE sms_data 
+      ADD COLUMN IF NOT EXISTS submitted_user_code VARCHAR(100);
+    `);
+
+    // 3. Ensure the 'three_digit_transactions' tracking table exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS three_digit_transactions (
+          id SERIAL PRIMARY KEY,
+          sms_id INTEGER REFERENCES sms_data(id),
+          deposit_user_code VARCHAR(100),
+          amount NUMERIC(10, 2),
+          last_3_digits VARCHAR(10),
+          status VARCHAR(50) DEFAULT 'verified',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await client.query('COMMIT');
+
+    return res.json({
+      success: true,
+      message: "Database successfully repaired! Triggers removed and missing column added."
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error("Migration Fix Error:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
 
 app.post("/migration/add-message-column", async (req, res) => {
     try {
@@ -405,15 +463,10 @@ app.get('/dbset', async (req, res) => {
 
 
 
-
-
-// ==========================================
-// 📱 ANDROID APP BACKEND FEED EDGE
-// ==========================================
 app.get('/db/sms-data', async (req, res) => {
     try {
-        // Explicitly include status in the column selection field list
-        const query = 'SELECT trx_id, amount, sender, created_at, status FROM sms_data ORDER BY created_at DESC;';
+        // Included 'message' alongside trx_id, amount, sender, created_at, and status
+        const query = 'SELECT trx_id, amount, sender, message, created_at, status FROM sms_data ORDER BY created_at DESC;';
         const result = await db.query(query);
         
         return res.status(200).json(result.rows);
@@ -422,6 +475,22 @@ app.get('/db/sms-data', async (req, res) => {
         return res.status(500).json({ error: error.message });
     }
 });
+
+// ==========================================
+// 📱 ANDROID APP BACKEND FEED EDGE
+// ==========================================
+// app.get('/db/sms-data', async (req, res) => {
+//     try {
+//         // Explicitly include status in the column selection field list
+//         const query = 'SELECT trx_id, amount, sender, created_at, status FROM sms_data ORDER BY created_at DESC;';
+//         const result = await db.query(query);
+        
+//         return res.status(200).json(result.rows);
+//     } catch (error) {
+//         console.error('❌ Failed to pull data ledger logs:', error);
+//         return res.status(500).json({ error: error.message });
+//     }
+// });
 // ==========================================
 // 🗑️ CLEAN HISTORY ROUTE
 // ==========================================
