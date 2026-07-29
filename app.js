@@ -1534,25 +1534,41 @@ app.post('/api/verify/sms', async (req, res) => {
     /* 
       🎯 SAFE REGEX MATCHING:
       Matches patterns like: "from 0174XXXX467" or "from 017*****467"
-      - \d{3,4} -> matches prefix numbers (e.g. 017, 0174)
-      - [A-Za-z0-9\*]+ -> matches masked characters (e.g. XXXX, ****)
-      - ${cleanLast3Digits} -> matches exact last 3 digits
     */
     const phonePattern = `%from [0-9]{3,4}[A-Za-z0-9*]+${cleanLast3Digits}%`;
 
-    const smsMatch = await client.query(
-      `SELECT id FROM sms_data 
-       WHERE amount = $1 
-         AND status = 'pending'
-         AND message SIMILAR TO $2
-       ORDER BY created_at DESC LIMIT 1`,
-      [targetAmount, phonePattern]
-    );
+    let smsMatch = null;
+    const maxRetries = 5;
+    const delayMs = 2000; // 2 seconds delay per attempt
 
-    if (smsMatch.rows.length === 0) {
+    console.log(`🔍 [SMS VERIFY]: Starting search sequence for Last 3 Digits: ${cleanLast3Digits}, Amount: ৳${targetAmount}`);
+
+    // 🔄 Polling Loop: Retry up to 5 times (10 seconds total) to allow incoming SMS webhooks to arrive
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      smsMatch = await client.query(
+        `SELECT id FROM sms_data 
+         WHERE amount = $1 
+           AND status = 'pending'
+           AND message SIMILAR TO $2
+         ORDER BY created_at DESC LIMIT 1`,
+        [targetAmount, phonePattern]
+      );
+
+      if (smsMatch.rows.length > 0) {
+        console.log(`🎯 [SMS FOUND]: Match discovered on attempt #${attempt}`);
+        break;
+      }
+
+      if (attempt < maxRetries) {
+        console.log(`⏳ [SMS POLLING]: Attempt #${attempt} failed. Retrying in 2s...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+    }
+
+    if (!smsMatch || smsMatch.rows.length === 0) {
       return res.status(404).json({ 
         status: 'not_found', 
-        message: 'No matching transaction found. Please check your amount and last 3 digits, or ensure you have deposited first.' 
+        message: 'No matching transaction found. Please ensure you have transferred the funds and double-check your amount and last 3 digits.' 
       });
     }
 
@@ -1561,13 +1577,20 @@ app.post('/api/verify/sms', async (req, res) => {
     // --- START DB TRANSACTION ---
     await client.query('BEGIN');
 
-    // Update transaction status to verified
+    // 1. Mark SMS record as verified
     await client.query(
       `UPDATE sms_data 
-       SET status = 'verified', 
-           submitted_user_code = $1 
-       WHERE id = $2`, 
-      [clientUserCode, matchedSms.id]
+       SET status = 'verified' 
+       WHERE id = $1`, 
+      [matchedSms.id]
+    );
+
+    // 2. Insert record into tracking table
+    await client.query(
+      `INSERT INTO three_digit_transactions 
+       (sms_id, deposit_user_code, amount, last_3_digits, status) 
+       VALUES ($1, $2, $3, $4, 'verified')`,
+      [matchedSms.id, clientUserCode, targetAmount, cleanLast3Digits]
     );
 
     // 🚀 Trigger 3rd-party deposit automation
@@ -2566,6 +2589,8 @@ app.get('/', async (req, res) => {
         }
 
         // ৫. এপিআই অনুরোধ প্রক্রিয়া ও ডিসপ্যাচ লাইফসাইকেল
+
+        
         function dispatchEngineRequest(tab) {
             const alertId = tab === 'private' ? 'alertPrivate' : (tab === 'remit' ? 'alertRemit' : 'alertSms');
             document.getElementById(alertId).className = 'in-card-alert';
