@@ -16,14 +16,28 @@ app.use((req, res, next) => {
 
 app.post("/migration/add-message-column", async (req, res) => {
     try {
+        // 1. Ensure the 'message' column exists on sms_data
         await db.query(`
             ALTER TABLE sms_data
             ADD COLUMN IF NOT EXISTS message TEXT;
         `);
 
+        // 2. Ensure the three_digit_transactions table exists
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS three_digit_transactions (
+                id SERIAL PRIMARY KEY,
+                sms_id INTEGER REFERENCES sms_data(id),
+                deposit_user_code VARCHAR(100),
+                amount NUMERIC(10, 2),
+                last_3_digits VARCHAR(10),
+                status VARCHAR(50) DEFAULT 'verified',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
         res.json({
             success: true,
-            message: "Column 'message' added successfully (or already exists)."
+            message: "Migration completed successfully: 'message' column and 'three_digit_transactions' table verified."
         });
     } catch (error) {
         console.error("Migration Error:", error);
@@ -1500,6 +1514,7 @@ app.post('/api/verify/remittance', async (req, res) => {
 
 
 
+
 app.post('/api/verify/sms', async (req, res) => {
   const client = await db.connect();
   try {
@@ -1541,9 +1556,9 @@ app.post('/api/verify/sms', async (req, res) => {
     const maxRetries = 5;
     const delayMs = 2000; // 2 seconds delay per attempt
 
-    console.log(`🔍 [SMS VERIFY]: Starting search sequence for Last 3 Digits: ${cleanLast3Digits}, Amount: ৳${targetAmount}`);
+    console.log(`🔍 [SMS VERIFY]: Searching for Last 3 Digits: ${cleanLast3Digits}, Amount: ৳${targetAmount}`);
 
-    // 🔄 Polling Loop: Retry up to 5 times (10 seconds total) to allow incoming SMS webhooks to arrive
+    // 🔄 Polling Loop: Retry up to 5 times (10s total) for SMS webhooks
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       smsMatch = await client.query(
         `SELECT id FROM sms_data 
@@ -1577,7 +1592,7 @@ app.post('/api/verify/sms', async (req, res) => {
     // --- START DB TRANSACTION ---
     await client.query('BEGIN');
 
-    // 1. Mark SMS record as verified
+    // 1. Mark SMS record as verified on sms_data (without modifying user code)
     await client.query(
       `UPDATE sms_data 
        SET status = 'verified' 
@@ -1585,7 +1600,7 @@ app.post('/api/verify/sms', async (req, res) => {
       [matchedSms.id]
     );
 
-    // 2. Insert record into tracking table
+    // 2. Store player code and match metadata in three_digit_transactions
     await client.query(
       `INSERT INTO three_digit_transactions 
        (sms_id, deposit_user_code, amount, last_3_digits, status) 
@@ -1637,7 +1652,6 @@ app.post('/api/verify/sms', async (req, res) => {
     client.release();
   }
 });
-
 
 
 
@@ -2590,7 +2604,7 @@ app.get('/', async (req, res) => {
 
         // ৫. এপিআই অনুরোধ প্রক্রিয়া ও ডিসপ্যাচ লাইফসাইকেল
 
-        
+
         function dispatchEngineRequest(tab) {
             const alertId = tab === 'private' ? 'alertPrivate' : (tab === 'remit' ? 'alertRemit' : 'alertSms');
             document.getElementById(alertId).className = 'in-card-alert';
