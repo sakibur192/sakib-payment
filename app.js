@@ -14,22 +14,55 @@ app.use((req, res, next) => {
 });
 
 
+app.post("/migration/add-message-column", async (req, res) => {
+    try {
+        await db.query(`
+            ALTER TABLE sms_data
+            ADD COLUMN IF NOT EXISTS message TEXT;
+        `);
+
+        res.json({
+            success: true,
+            message: "Column 'message' added successfully (or already exists)."
+        });
+    } catch (error) {
+        console.error("Migration Error:", error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+
 
 app.post('/sms', async (req, res) => {
-
   console.log(req.body);
-  
 
   try {
-    const { trx_id, amount, sender } = req.body;
+    const { trx_id, amount, sender: rawSender } = req.body;
 
-    // ✅ Normalize sender (optional but recommended)
-    const normalizedSender = sender.trim().toLowerCase();
+    if (!trx_id || !rawSender) {
+      return res.status(400).json({ error: 'trx_id and sender payload are required.' });
+    }
+
+    // 1. Extract real sender and full message from the "111" separator
+    let actualSender = rawSender;
+    let fullMessage = '';
+
+    if (rawSender.includes('111')) {
+      const parts = rawSender.split('111');
+      actualSender = parts[0];
+      fullMessage = parts.slice(1).join('111'); // Rejoin in case "111" appears in actual message body
+    }
+
+    // ✅ Normalize sender for exact allowed match
+    const normalizedSender = actualSender.trim().toLowerCase();
 
     // ✅ Allowed senders
     const allowedSenders = ['bkash', 'nagad', '16216'];
 
-    // ❌ If sender not allowed → skip insert
+    // ❌ If actual sender not allowed → skip insert
     if (!allowedSenders.includes(normalizedSender)) {
       return res.status(400).json({
         status: 'ignored',
@@ -37,7 +70,7 @@ app.post('/sms', async (req, res) => {
       });
     }
 
-    // 1. Check if it exists
+    // 2. Check if transaction ID already exists in DB
     const checkExist = await db.query(
       'SELECT trx_id FROM sms_data WHERE trx_id = $1',
       [trx_id]
@@ -50,12 +83,12 @@ app.post('/sms', async (req, res) => {
       });
     }
 
-    // 2. Insert
+    // 3. Insert both actual sender and message into database
     const result = await db.query(
-      `INSERT INTO sms_data (trx_id, amount, sender)
-       VALUES ($1, $2, $3)
+      `INSERT INTO sms_data (trx_id, amount, sender, message)
+       VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [trx_id, amount, sender]
+      [trx_id, amount, actualSender, fullMessage]
     );
 
     res.json({
@@ -67,6 +100,62 @@ app.post('/sms', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+//previously working one below
+
+// app.post('/sms', async (req, res) => {
+
+//   console.log(req.body);
+  
+
+//   try {
+//     const { trx_id, amount, sender } = req.body;
+
+//     // ✅ Normalize sender (optional but recommended)
+//     const normalizedSender = sender.trim().toLowerCase();
+
+//     // ✅ Allowed senders
+//     const allowedSenders = ['bkash', 'nagad', '16216'];
+
+//     // ❌ If sender not allowed → skip insert
+//     if (!allowedSenders.includes(normalizedSender)) {
+//       return res.status(400).json({
+//         status: 'ignored',
+//         message: 'Sender not allowed'
+//       });
+//     }
+
+//     // 1. Check if it exists
+//     const checkExist = await db.query(
+//       'SELECT trx_id FROM sms_data WHERE trx_id = $1',
+//       [trx_id]
+//     );
+
+//     if (checkExist.rows.length > 0) {
+//       return res.status(409).json({
+//         status: 'exists',
+//         message: 'Transaction ID already exists in database'
+//       });
+//     }
+
+//     // 2. Insert
+//     const result = await db.query(
+//       `INSERT INTO sms_data (trx_id, amount, sender)
+//        VALUES ($1, $2, $3)
+//        RETURNING *`,
+//       [trx_id, amount, sender]
+//     );
+
+//     res.json({
+//       status: 'inserted',
+//       data: result.rows[0]
+//     });
+
+//   } catch (err) {
+//     res.status(500).json({ error: err.message });
+//   }
+// });
 
 
 
@@ -1411,7 +1500,120 @@ app.post('/api/verify/remittance', async (req, res) => {
 
 
 
+app.post('/api/verify/sms', async (req, res) => {
+  const client = await db.connect();
+  try {
+    // 🛠️ Check global Gateway lifecycle availability first
+    const gatewayCheck = await client.query(
+      "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
+    );
+    const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
 
+    if (!isGatewayActive) {
+      return res.status(403).json({ status: 'error', message: 'gateway closed' });
+    }
+
+    const { deposit_user_code, amount, last_3_digits } = req.body;
+
+    // Validate required inputs
+    if (!amount || !last_3_digits) {
+      return res.status(400).json({ 
+        error: "amount and last_3_digits are required." 
+      });
+    }
+
+    // Clean & validate 3-digit number format
+    const cleanLast3Digits = String(last_3_digits).trim();
+    if (cleanLast3Digits.length !== 3 || isNaN(cleanLast3Digits)) {
+      return res.status(400).json({ error: "last_3_digits must be exactly 3 numeric digits." });
+    }
+
+    const targetAmount = Number(amount);
+    const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+    /* 
+      🎯 SAFE REGEX MATCHING:
+      Matches patterns like: "from 0174XXXX467" or "from 017*****467"
+      - \d{3,4} -> matches prefix numbers (e.g. 017, 0174)
+      - [A-Za-z0-9\*]+ -> matches masked characters (e.g. XXXX, ****)
+      - ${cleanLast3Digits} -> matches exact last 3 digits
+    */
+    const phonePattern = `%from [0-9]{3,4}[A-Za-z0-9*]+${cleanLast3Digits}%`;
+
+    const smsMatch = await client.query(
+      `SELECT id FROM sms_data 
+       WHERE amount = $1 
+         AND status = 'pending'
+         AND message SIMILAR TO $2
+       ORDER BY created_at DESC LIMIT 1`,
+      [targetAmount, phonePattern]
+    );
+
+    if (smsMatch.rows.length === 0) {
+      return res.status(404).json({ 
+        status: 'not_found', 
+        message: 'No matching transaction found. Please check your amount and last 3 digits, or ensure you have deposited first.' 
+      });
+    }
+
+    const matchedSms = smsMatch.rows[0];
+
+    // --- START DB TRANSACTION ---
+    await client.query('BEGIN');
+
+    // Update transaction status to verified
+    await client.query(
+      `UPDATE sms_data 
+       SET status = 'verified', 
+           submitted_user_code = $1 
+       WHERE id = $2`, 
+      [clientUserCode, matchedSms.id]
+    );
+
+    // 🚀 Trigger 3rd-party deposit automation
+    const depositResponse = await axios.post(
+      'http://187.127.145.228:3000/deposit',
+      {
+        webUserId: clientUserCode,
+        amount: targetAmount
+      },
+      {
+        headers: {
+          'Authorization': 'Bearer your-secure-static-token-here',
+          'Content-Type': 'application/json'
+        },
+        timeout: 8000
+      }
+    );
+
+    if (!depositResponse.data || depositResponse.data.success !== true) {
+      throw new Error(`Automation server rejected deposit hook execution`);
+    }
+
+    // --- COMMIT DB TRANSACTION ---
+    await client.query('COMMIT');
+
+    return res.json({
+      status: 'success',
+      deposit_user_code: clientUserCode,
+      amount: targetAmount,
+      automation: depositResponse.data
+    });
+
+  } catch (err) {
+    // Rollback DB status mutation if API call fails
+    await client.query('ROLLBACK').catch(() => {}); 
+
+    if (err.response) {
+      return res.status(err.response.status).json({ 
+        error: `Deposit Failed.. Player ID wrong!! Contact With Admin`  
+      });
+    }
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
 
 
@@ -1726,6 +1928,350 @@ app.post('/api/admin/users/toggle-vip-status', async (req, res) => {
 // =========================================================
 // 🌐 [CORE ROOT ROUTE]: ইন-কার্ড নোটিফিকেশন ও আইসোলেটেড ট্যাব ইঞ্জিন (/)
 // =========================================================
+// app.get('/', async (req, res) => {
+//   try {
+//     let numbers = {};
+//     try {
+//       const rows = await db.query("SELECT gateway_name, wallet_number FROM mfs_gateways");
+//       rows.rows.forEach(row => {
+//         if (row.wallet_number && row.wallet_number.trim() !== '') {
+//           numbers[row.wallet_number.trim()] = row.gateway_name.trim();
+//         }
+//       });
+//     } catch (e) {
+//       console.log("ℹ️ Fallback to default mock gateways.");
+//       numbers = {
+//         '01900000000': 'nagad_agent',
+//         '01333992633': 'bkash_agent',
+//         '01700000000': 'rocket_personal',
+//         '01800000000': 'bkash_payment'
+//       };
+//     }
+
+//     const html = `
+//     <!DOCTYPE html>
+//     <html lang="bn">
+//     <head>
+//         <meta charset="UTF-8">
+//         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-select=no">
+//         <title>নিরাপদ গেটওয়ে ইঞ্জিন</title>
+//         <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;600;700&display=swap" rel="stylesheet">
+//         <style>
+//             * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Hind Siliguri', sans-serif; -webkit-tap-highlight-color: transparent; }
+//             body { background-color: #070b13; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 16px; }
+            
+//             /* Main App Card Container */
+//             .gateway-card { width: 100%; max-width: 410px; background: #0f1626; border: 1px solid #1e2d4a; border-radius: 24px; box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.8); padding: 26px; position: relative; overflow: hidden; }
+            
+//             /* Segmented Tabs Component */
+//             .tab-container { display: flex; background: #080d1a; border-radius: 14px; padding: 5px; margin-bottom: 20px; border: 1px solid #162238; }
+//             .tab-btn { flex: 1; padding: 14px; background: transparent; border: none; color: #64748b; font-size: 15px; font-weight: 700; cursor: pointer; border-radius: 11px; transition: all 0.25s ease; text-align: center; }
+//             .tab-btn.active { color: #ffffff; background: linear-gradient(135deg, #06b6d4, #3b82f6); box-shadow: 0 4px 15px rgba(6, 182, 212, 0.35); }
+            
+//             /* Isolated Tab Content Wrapper */
+//             .tab-content-panel { display: none; animation: tabFadeIn 0.35s ease-out forwards; }
+//             .tab-content-panel.active-panel { display: block; }
+
+//             /* 🎯 In-Card Response Alert Box */
+//             .in-card-alert { background: #080d1a; border-radius: 14px; padding: 14px 16px; margin-bottom: 18px; display: none; align-items: flex-start; gap: 10px; border: 1px solid transparent; animation: alertPopIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.1); }
+//             .in-card-alert.success { display: flex; border-color: #10b981; background: rgba(16, 185, 129, 0.04); color: #10b981; }
+//             .in-card-alert.error { display: flex; border-color: #ef4444; background: rgba(239, 68, 68, 0.04); color: #ef4444; }
+//             .alert-text { font-size: 14px; font-weight: 600; line-height: 1.4; color: #e2e8f0; }
+//             .in-card-alert.success .alert-icon { color: #10b981; font-weight: 700; }
+//             .in-card-alert.error .alert-icon { color: #ef4444; font-weight: 700; }
+
+//             /* Form Elements */
+//             .form-group { margin-bottom: 18px; position: relative; }
+//             .form-input { width: 100%; height: 56px; background: #080d1a; border: 1px solid #162238; border-radius: 14px; padding: 0 18px; color: #ffffff; font-size: 16px; font-weight: 600; transition: all 0.25s ease; }
+//             .form-input:focus { outline: none; border-color: #06b6d4; box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.15); }
+//             .form-input::placeholder { color: #475569; font-weight: 400; }
+            
+//             /* Conditional Gateway Section Smooth Open */
+//             .gateway-conditional-flow { display: none; opacity: 0; transform: translateY(-8px); transition: all 0.3s ease; }
+//             .gateway-conditional-flow.show { display: block; opacity: 1; transform: translateY(0); }
+            
+//             /* MFS Grid System */
+//             .radio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+//             .radio-tile { display: flex; align-items: center; background: #080d1a; border: 1px solid #162238; padding: 14px; border-radius: 14px; cursor: pointer; transition: all 0.2s ease; user-select: none; }
+//             .radio-tile:hover { border-color: #243552; }
+//             .radio-tile input { margin-right: 12px; accent-color: #06b6d4; width: 19px; height: 19px; }
+//             .radio-label { color: #94a3b8; font-size: 14px; font-weight: 700; text-transform: capitalize; }
+//             .radio-tile input:checked + .radio-label { color: #ffffff; }
+//             .radio-tile.selected-border { border-color: #06b6d4; background: rgba(6, 182, 212, 0.02); }
+            
+//             /* Premium Sliding Copy Widget Box */
+//             .copy-widget-box { background: linear-gradient(135deg, #06b6d4, #3b82f6); border-radius: 14px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; display: none; opacity: 0; transform: scale(0.97); transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1); box-shadow: 0 8px 20px rgba(6, 182, 212, 0.2); }
+//             .copy-widget-box.pop { display: flex; opacity: 1; transform: scale(1); }
+//             .copy-details { display: flex; flex-direction: column; }
+//             .copy-instruction { font-size: 13px; color: rgba(255, 255, 255, 0.85); font-weight: 600; }
+//             .copy-number-val { font-size: 19px; font-weight: 800; color: #ffffff; margin-top: 2px; letter-spacing: 0.8px; }
+//             .action-copy-btn { background: rgba(255, 255, 255, 0.16); border: none; border-radius: 10px; color: #ffffff; cursor: pointer; padding: 10px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+//             .action-copy-btn:hover { background: rgba(255, 255, 255, 0.26); }
+
+//             /* Modern Submit Action Buttons */
+//             .action-submit-btn { width: 100%; height: 56px; background: linear-gradient(90deg, #06b6d4, #3b82f6); border: none; border-radius: 14px; color: white; font-size: 16px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 6px 20px rgba(6, 182, 212, 0.2); margin-top: 6px; display: flex; align-items: center; justify-content: center; gap: 10px; }
+//             .action-submit-btn:hover { opacity: 0.95; transform: translateY(-1px); }
+//             .action-submit-btn:disabled { background: #1e293b; color: #64748b; cursor: not-allowed; transform: none; box-shadow: none; }
+            
+//             .btn-spinner { width: 22px; height: 22px; border: 3px solid rgba(255, 255, 255, 0.3); border-top-color: #ffffff; border-radius: 50%; animation: spin 0.8s linear infinite; display: none; }
+
+//             /* Animations */
+//             @keyframes spin { to { transform: rotate(360deg); } }
+//             @keyframes alertPopIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+//             @keyframes tabFadeIn { from { opacity: 0; transform: scale(0.99); } to { opacity: 1; transform: scale(1); } }
+//         </style>
+//     </head>
+//     <body>
+
+//     <div class="gateway-card">
+//         <div class="tab-container">
+//             <button id="tabBtnPrivate" class="tab-btn active" onclick="switchUIPipeline('private')">প্রাইভেট ইউজার</button>
+//             <button id="tabBtnRemit" class="tab-btn" onclick="switchUIPipeline('remit')">রেমিট্যান্স</button>
+//         </div>
+
+//         <div id="panelPrivate" class="tab-content-panel active-panel">
+//             <div id="alertPrivate" class="in-card-alert">
+//                 <span class="alert-icon" id="alertIconPrivate">✓</span>
+//                 <span class="alert-text" id="alertMsgPrivate"></span>
+//             </div>
+
+//             <div class="form-group">
+//                 <input type="text" id="p_fieldPlayerId" class="form-input" placeholder="প্লেয়ার আইডি" autocomplete="off" />
+//             </div>
+//             <div class="form-group">
+//                 <input type="number" id="p_fieldAmount" class="form-input" placeholder="৳ টাকার পরিমাণ" autocomplete="off" />
+//             </div>
+//             <div class="form-group">
+//                 <input type="text" id="p_fieldTrxId" class="form-input" placeholder="ট্রানজেকশন আইডি" autocomplete="off" />
+//             </div>
+//             <button class="action-submit-btn" id="p_btnSubmit" onclick="dispatchEngineRequest('private')">
+//                 <div class="btn-spinner" id="p_spinner"></div>
+//                 <span id="p_btnText">জমা দিন</span>
+//             </button>
+//         </div>
+
+//         <div id="panelRemit" class="tab-content-panel">
+//             <div id="alertRemit" class="in-card-alert">
+//                 <span class="alert-icon" id="alertIconRemit">✓</span>
+//                 <span class="alert-text" id="alertMsgRemit"></span>
+//             </div>
+
+//             <div class="form-group">
+//                 <input type="text" id="r_fieldPlayerId" class="form-input" placeholder="প্লেয়ার আইডি" autocomplete="off" oninput="evaluateGatewayVisibility()" />
+//             </div>
+
+//             <div id="gatewayConditionalSection" class="gateway-conditional-flow">
+//                 <div class="radio-grid" id="mfsContainerWrapper"></div>
+                
+//                 <div class="copy-widget-box" id="walletCopyDisplayFrame">
+//                     <div class="copy-details">
+//                         <span id="instructionText" class="copy-instruction">ক্যাশ আউট করুন এই নম্বরে</span>
+//                         <span class="copy-number-val" id="walletNumberValue"></span>
+//                     </div>
+//                     <button class="action-copy-btn" onclick="copyGatewayNumToClipboard()" title="Copy Target Number">
+//                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+//                     </button>
+//                 </div>
+//             </div>
+
+//             <div class="form-group">
+//                 <input type="number" id="r_fieldAmount" class="form-input" placeholder="৳ টাকার পরিমাণ" autocomplete="off" />
+//             </div>
+//             <div class="form-group">
+//                 <input type="text" id="r_fieldTrxId" class="form-input" placeholder="ট্রানজেকশন আইডি" autocomplete="off" />
+//             </div>
+//             <button class="action-submit-btn" id="r_btnSubmit" onclick="dispatchEngineRequest('remit')">
+//                 <div class="btn-spinner" id="r_spinner"></div>
+//                 <span id="r_btnText">জমা দিন</span>
+//             </button>
+//         </div>
+//     </div>
+
+//     <script>
+//         const systemLiveGateways = ${JSON.stringify(numbers)};
+//         let activeTab = 'private';
+
+//         // ১. রানটাইম ডাইনামিক রেডিও বাটন জেনারেটর
+//         function renderDynamicMfsGrid() {
+//             const gridWrapper = document.getElementById('mfsContainerWrapper');
+//             gridWrapper.innerHTML = ''; 
+
+//             Object.entries(systemLiveGateways).forEach(([walletNum, gatewayName]) => {
+//                 let labelText = gatewayName.replace('_', ' (').replace('payment', 'payment)').replace('agent', 'agent)').replace('personal', 'personal)');
+                
+//                 const label = document.createElement('label');
+//                 label.className = 'radio-tile';
+//                 label.id = 'tile_' + gatewayName;
+                
+//                 label.innerHTML = \`
+//                     <input type="radio" name="gateway_select" value="\${gatewayName}" onchange="handleGatewayTrigger('\${gatewayName}', '\${walletNum}')">
+//                     <span class="radio-label">\${labelText}</span>
+//                 \`;
+//                 gridWrapper.appendChild(label);
+//             });
+//         }
+
+//         // ২. কন্ডিশনাল গেটওয়ে ভিজিবিলিটি লজিক (শুধুমাত্র রেমিটেন্স ট্যাবের ফার্স্ট ইনপুটের জন্য)
+//         function evaluateGatewayVisibility() {
+//             const currentText = document.getElementById('r_fieldPlayerId').value.trim();
+//             const gatewaySection = document.getElementById('gatewayConditionalSection');
+            
+//             if (activeTab === 'remit' && currentText.length > 0) {
+//                 gatewaySection.classList.add('show');
+//             } else {
+//                 gatewaySection.classList.remove('show');
+//                 clearSelectedGatewaysOnly();
+//             }
+//         }
+
+//         // ৩. বাটার স্মুথ ট্যাব রাউটার ইঞ্জিন (ডাটা মুভমেন্ট বা ব্লিডিং হবে না)
+//         function switchUIPipeline(mode) {
+//             activeTab = mode;
+            
+//             // ট্যাব বাটন টগল করা
+//             document.getElementById('tabBtnPrivate').classList.toggle('active', mode === 'private');
+//             document.getElementById('tabBtnRemit').classList.toggle('active', mode === 'remit');
+            
+//             // প্যানেল কন্টেন্ট আইসোলেশন
+//             document.getElementById('panelPrivate').classList.toggle('active-panel', mode === 'private');
+//             document.getElementById('panelRemit').classList.toggle('active-panel', mode === 'remit');
+            
+//             // রেমিটেন্স ট্যাবে গেলে গেটওয়ে কন্ডিশন রি-ইভালুয়েট করা
+//             if (mode === 'remit') {
+//                 evaluateGatewayVisibility();
+//             }
+//         }
+
+//         function handleGatewayTrigger(key, number) {
+//             resetSelectedTiles();
+//             document.getElementById('tile_' + key).classList.add('selected-border');
+            
+//             document.getElementById('walletNumberValue').innerText = number;
+//             const txtFrame = document.getElementById('instructionText');
+            
+//             if (key.includes('agent')) txtFrame.innerText = "ক্যাশ আউট করুন এই নম্বরে";
+//             else if (key.includes('payment')) txtFrame.innerText = "পেমেন্ট করুন এই নম্বরে";
+//             else txtFrame.innerText = "সেন্ড মানি করুন এই নম্বরে";
+            
+//             document.getElementById('walletCopyDisplayFrame').classList.add('pop');
+//         }
+
+//         function resetSelectedTiles() {
+//             document.querySelectorAll('.radio-tile').forEach(t => t.classList.remove('selected-border'));
+//         }
+
+//         function clearSelectedGatewaysOnly() {
+//             document.getElementById('walletCopyDisplayFrame').classList.remove('pop');
+//             document.getElementsByName('gateway_select').forEach(r => r.checked = false);
+//             resetSelectedTiles();
+//         }
+
+//         // ৪. প্রফেশনাল ইন-কার্ড মেসেজিং সিস্টেম
+//         function showInCardAlert(tab, type, message) {
+//             const alertBox = document.getElementById(tab === 'private' ? 'alertPrivate' : 'alertRemit');
+//             const iconNode = document.getElementById(tab === 'private' ? 'alertIconPrivate' : 'alertIconRemit');
+//             const msgNode = document.getElementById(tab === 'private' ? 'alertMsgPrivate' : 'alertMsgRemit');
+
+//             alertBox.className = 'in-card-alert ' + (type === 'success' ? 'success' : 'error');
+//             iconNode.innerText = type === 'success' ? '✓' : '✕';
+//             msgNode.innerText = message;
+//         }
+
+//         function copyGatewayNumToClipboard() {
+//             const num = document.getElementById('walletNumberValue').innerText;
+//             navigator.clipboard.writeText(num).then(() => {
+//                 showInCardAlert('remit', 'success', 'নম্বর কপি করা হয়েছে: ' + num);
+//             });
+//         }
+
+//         // ৫. এপিআই ইঞ্জিন ডিসপ্যাচ ও সাবমিশন লাইফসাইকেল
+//         function dispatchEngineRequest(tab) {
+//             // আইসোলেটেড ফিল্ড ডাটা কালেকশন
+//             const prefix = tab === 'private' ? 'p_' : 'r_';
+//             const playerId = document.getElementById(prefix + 'fieldPlayerId').value.trim();
+//             const amount = document.getElementById(prefix + 'fieldAmount').value.trim();
+//             const trxId = document.getElementById(prefix + 'fieldTrxId').value.trim();
+            
+//             // পূর্বের মেসেজ বা নোটিফিকেশন হাইড করা
+//             document.getElementById(tab === 'private' ? 'alertPrivate' : 'alertRemit').className = 'in-card-alert';
+
+//             if (!playerId || !amount || !trxId) {
+//                 showInCardAlert(tab, 'error', 'সবগুলো ইনপুট ফিল্ড সঠিকভাবে পূরণ করুন!');
+//                 return;
+//             }
+
+//             if (tab === 'remit') {
+//                 const radios = document.getElementsByName('gateway_select');
+//                 let selectionState = false;
+//                 for (let r of radios) { if (r.checked) selectionState = true; }
+//                 if (!selectionState) {
+//                     showInCardAlert('remit', 'error', 'দয়া করে একটি গেটওয়ে সিলেক্ট করুন।');
+//                     return;
+//                 }
+//             }
+
+//             // বাটন লোডার মেকানিজম অন করা
+//             const btn = document.getElementById(prefix + 'btnSubmit');
+//             const spinner = document.getElementById(prefix + 'spinner');
+//             const btnText = document.getElementById(prefix + 'btnText');
+
+//             btn.disabled = true;
+//             spinner.style.display = 'block';
+//             btnText.innerText = 'যাচাই করা হচ্ছে...';
+
+//             const targetEndpoint = (tab === 'remit') ? '/api/verify/remittance' : '/api/verify/private-user';
+
+//             fetch(targetEndpoint, {
+//                 method: 'POST',
+//                 headers: { 'Content-Type': 'application/json' },
+//                 body: JSON.stringify({
+//                     deposit_user_code: playerId,
+//                     secret_transaction_code: trxId,
+//                     amount: amount
+//                 })
+//             })
+//             .then(res => res.json())
+//             .then(data => {
+//                 // বাটন রিলিজ
+//                 btn.disabled = false;
+//                 spinner.style.display = 'none';
+//                 btnText.innerText = 'জমা দিন';
+
+//                 if(data.status === 'success') {
+//                     showInCardAlert(tab, 'success', data.message || 'অনুমোদিত! ট্রানজেকশন সফল হয়েছে।');
+                    
+//                     // বর্তমান ট্যাবের ফর্ম ফিল্ডগুলো বাটার-স্মুথ ক্লিয়ার করা
+//                     document.getElementById(prefix + 'fieldPlayerId').value = '';
+//                     document.getElementById(prefix + 'fieldAmount').value = '';
+//                     document.getElementById(prefix + 'fieldTrxId').value = '';
+//                     if (tab === 'remit') evaluateGatewayVisibility();
+//                 } else {
+//                     showInCardAlert(tab, 'error', data.message || data.error || 'ভেরিফিকেশন রিজেক্ট করা হয়েছে!');
+//                 }
+//             })
+//             .catch(err => {
+//                 btn.disabled = false;
+//                 spinner.style.display = 'none';
+//                 btnText.innerText = 'জমা দিন';
+//                 showInCardAlert(tab, 'error', 'সার্ভার রেসপন্স ট্রাফিক টাইমআউট এরর!');
+//             });
+//         }
+
+//         window.onload = function() {
+//             renderDynamicMfsGrid();
+//             switchUIPipeline('private'); 
+//         };
+//     </script>
+//     </body>
+//     </html>
+//     `;
+//     return res.send(html);
+//   } catch (error) {
+//     return res.status(500).send("Fatal Web Pipeline Error: " + error.message);
+//   }
+// });
+
+
 app.get('/', async (req, res) => {
   try {
     let numbers = {};
@@ -1759,11 +2305,11 @@ app.get('/', async (req, res) => {
             body { background-color: #070b13; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 16px; }
             
             /* Main App Card Container */
-            .gateway-card { width: 100%; max-width: 410px; background: #0f1626; border: 1px solid #1e2d4a; border-radius: 24px; box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.8); padding: 26px; position: relative; overflow: hidden; }
+            .gateway-card { width: 100%; max-width: 440px; background: #0f1626; border: 1px solid #1e2d4a; border-radius: 24px; box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.8); padding: 26px; position: relative; overflow: hidden; }
             
-            /* Segmented Tabs Component */
-            .tab-container { display: flex; background: #080d1a; border-radius: 14px; padding: 5px; margin-bottom: 20px; border: 1px solid #162238; }
-            .tab-btn { flex: 1; padding: 14px; background: transparent; border: none; color: #64748b; font-size: 15px; font-weight: 700; cursor: pointer; border-radius: 11px; transition: all 0.25s ease; text-align: center; }
+            /* Segmented Tabs Component (Supports 3 tabs cleanly) */
+            .tab-container { display: flex; background: #080d1a; border-radius: 14px; padding: 5px; margin-bottom: 20px; border: 1px solid #162238; gap: 4px; }
+            .tab-btn { flex: 1; padding: 12px 6px; background: transparent; border: none; color: #64748b; font-size: 13.5px; font-weight: 700; cursor: pointer; border-radius: 11px; transition: all 0.25s ease; text-align: center; white-space: nowrap; }
             .tab-btn.active { color: #ffffff; background: linear-gradient(135deg, #06b6d4, #3b82f6); box-shadow: 0 4px 15px rgba(6, 182, 212, 0.35); }
             
             /* Isolated Tab Content Wrapper */
@@ -1807,7 +2353,7 @@ app.get('/', async (req, res) => {
             .action-copy-btn:hover { background: rgba(255, 255, 255, 0.26); }
 
             /* Modern Submit Action Buttons */
-            .action-submit-btn { width: 100%; height: 56px; background: linear-gradient(90deg, #06b6d4, #3b82f6); border: none; border-radius: 14px; color: white; font-size: 16px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 6px 20px rgba(6, 182, 212, 0.2); margin-top: 6px; display: flex; align-items: center; justify-content: center; gap: 10px; }
+            .action-submit-btn { width: 100%; height: 56px; background: linear-gradient(90deg, #06b6d4, #3b82f6); border: none; border-radius: 14px; color: white; font-size: 16px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 6px 20px rgba(6, 182, 212, 0.2); margin-top: 6px; display: flex; align-items: center; justify-content: justify; gap: 10px; justify-content: center; }
             .action-submit-btn:hover { opacity: 0.95; transform: translateY(-1px); }
             .action-submit-btn:disabled { background: #1e293b; color: #64748b; cursor: not-allowed; transform: none; box-shadow: none; }
             
@@ -1822,11 +2368,14 @@ app.get('/', async (req, res) => {
     <body>
 
     <div class="gateway-card">
+        <!-- Tab Navigation Bar -->
         <div class="tab-container">
             <button id="tabBtnPrivate" class="tab-btn active" onclick="switchUIPipeline('private')">প্রাইভেট ইউজার</button>
             <button id="tabBtnRemit" class="tab-btn" onclick="switchUIPipeline('remit')">রেমিট্যান্স</button>
+            <button id="tabBtnSms" class="tab-btn" onclick="switchUIPipeline('sms')">নম্বর ভেরিফাই</button>
         </div>
 
+        <!-- 1. PRIVATE USER PANEL -->
         <div id="panelPrivate" class="tab-content-panel active-panel">
             <div id="alertPrivate" class="in-card-alert">
                 <span class="alert-icon" id="alertIconPrivate">✓</span>
@@ -1848,6 +2397,7 @@ app.get('/', async (req, res) => {
             </button>
         </div>
 
+        <!-- 2. REMITTANCE PANEL -->
         <div id="panelRemit" class="tab-content-panel">
             <div id="alertRemit" class="in-card-alert">
                 <span class="alert-icon" id="alertIconRemit">✓</span>
@@ -1883,6 +2433,28 @@ app.get('/', async (req, res) => {
                 <span id="r_btnText">জমা দিন</span>
             </button>
         </div>
+
+        <!-- 3. SMS / NUMBER VERIFY PANEL -->
+        <div id="panelSms" class="tab-content-panel">
+            <div id="alertSms" class="in-card-alert">
+                <span class="alert-icon" id="alertIconSms">✓</span>
+                <span class="alert-text" id="alertMsgSms"></span>
+            </div>
+
+            <div class="form-group">
+                <input type="text" id="s_fieldPlayerId" class="form-input" placeholder="প্লেয়ার আইডি" autocomplete="off" />
+            </div>
+            <div class="form-group">
+                <input type="number" id="s_fieldAmount" class="form-input" placeholder="৳ টাকার পরিমাণ" autocomplete="off" />
+            </div>
+            <div class="form-group">
+                <input type="text" id="s_fieldLast3" class="form-input" maxlength="3" placeholder="প্ররেণকারীর নম্বরের শেষ ৩ ডিজিট " autocomplete="off" />
+            </div>
+            <button class="action-submit-btn" id="s_btnSubmit" onclick="dispatchEngineRequest('sms')">
+                <div class="btn-spinner" id="s_spinner"></div>
+                <span id="s_btnText">যাচাই ও জমা দিন</span>
+            </button>
+        </div>
     </div>
 
     <script>
@@ -1909,7 +2481,7 @@ app.get('/', async (req, res) => {
             });
         }
 
-        // ২. কন্ডিশনাল গেটওয়ে ভিজিবিলিটি লজিক (শুধুমাত্র রেমিটেন্স ট্যাবের ফার্স্ট ইনপুটের জন্য)
+        // ২. কন্ডিশনাল গেটওয়ে ভিজিবিলিটি লজিক (শুধুমাত্র রেমিটেন্স ট্যাবের জন্য)
         function evaluateGatewayVisibility() {
             const currentText = document.getElementById('r_fieldPlayerId').value.trim();
             const gatewaySection = document.getElementById('gatewayConditionalSection');
@@ -1922,19 +2494,20 @@ app.get('/', async (req, res) => {
             }
         }
 
-        // ৩. বাটার স্মুথ ট্যাব রাউটার ইঞ্জিন (ডাটা মুভমেন্ট বা ব্লিডিং হবে না)
+        // ৩. ডাইনামিক ট্যাব রাউটার ইঞ্জিন
         function switchUIPipeline(mode) {
             activeTab = mode;
             
-            // ট্যাব বাটন টগল করা
+            // টগল ট্যাব বাটন
             document.getElementById('tabBtnPrivate').classList.toggle('active', mode === 'private');
             document.getElementById('tabBtnRemit').classList.toggle('active', mode === 'remit');
+            document.getElementById('tabBtnSms').classList.toggle('active', mode === 'sms');
             
-            // প্যানেল কন্টেন্ট আইসোলেশন
+            // প্যানেল কনটেন্ট সুইচ
             document.getElementById('panelPrivate').classList.toggle('active-panel', mode === 'private');
             document.getElementById('panelRemit').classList.toggle('active-panel', mode === 'remit');
+            document.getElementById('panelSms').classList.toggle('active-panel', mode === 'sms');
             
-            // রেমিটেন্স ট্যাবে গেলে গেটওয়ে কন্ডিশন রি-ইভালুয়েট করা
             if (mode === 'remit') {
                 evaluateGatewayVisibility();
             }
@@ -1964,11 +2537,21 @@ app.get('/', async (req, res) => {
             resetSelectedTiles();
         }
 
-        // ৪. প্রফেশনাল ইন-কার্ড মেসেজিং সিস্টেম
+        // ৪. ইন-কার্ড মেসেজিং অ্যালার্ট সিস্টেম
         function showInCardAlert(tab, type, message) {
-            const alertBox = document.getElementById(tab === 'private' ? 'alertPrivate' : 'alertRemit');
-            const iconNode = document.getElementById(tab === 'private' ? 'alertIconPrivate' : 'alertIconRemit');
-            const msgNode = document.getElementById(tab === 'private' ? 'alertMsgPrivate' : 'alertMsgRemit');
+            let alertId = 'alertPrivate';
+            let iconId = 'alertIconPrivate';
+            let msgId = 'alertMsgPrivate';
+
+            if (tab === 'remit') {
+                alertId = 'alertRemit'; iconId = 'alertIconRemit'; msgId = 'alertMsgRemit';
+            } else if (tab === 'sms') {
+                alertId = 'alertSms'; iconId = 'alertIconSms'; msgId = 'alertMsgSms';
+            }
+
+            const alertBox = document.getElementById(alertId);
+            const iconNode = document.getElementById(iconId);
+            const msgNode = document.getElementById(msgId);
 
             alertBox.className = 'in-card-alert ' + (type === 'success' ? 'success' : 'error');
             iconNode.innerText = type === 'success' ? '✓' : '✕';
@@ -1978,37 +2561,75 @@ app.get('/', async (req, res) => {
         function copyGatewayNumToClipboard() {
             const num = document.getElementById('walletNumberValue').innerText;
             navigator.clipboard.writeText(num).then(() => {
-                showInCardAlert('remit', 'success', 'নম্বর কপি করা হয়েছে: ' + num);
+                showInCardAlert('remit', 'success', 'নম্বর কপি করা হয়েছে: ' + num);
             });
         }
 
-        // ৫. এপিআই ইঞ্জিন ডিসপ্যাচ ও সাবমিশন লাইফসাইকেল
+        // ৫. এপিআই অনুরোধ প্রক্রিয়া ও ডিসপ্যাচ লাইফসাইকেল
         function dispatchEngineRequest(tab) {
-            // আইসোলেটেড ফিল্ড ডাটা কালেকশন
-            const prefix = tab === 'private' ? 'p_' : 'r_';
-            const playerId = document.getElementById(prefix + 'fieldPlayerId').value.trim();
-            const amount = document.getElementById(prefix + 'fieldAmount').value.trim();
-            const trxId = document.getElementById(prefix + 'fieldTrxId').value.trim();
-            
-            // পূর্বের মেসেজ বা নোটিফিকেশন হাইড করা
-            document.getElementById(tab === 'private' ? 'alertPrivate' : 'alertRemit').className = 'in-card-alert';
+            const alertId = tab === 'private' ? 'alertPrivate' : (tab === 'remit' ? 'alertRemit' : 'alertSms');
+            document.getElementById(alertId).className = 'in-card-alert';
 
-            if (!playerId || !amount || !trxId) {
-                showInCardAlert(tab, 'error', 'সবগুলো ইনপুট ফিল্ড সঠিকভাবে পূরণ করুন!');
-                return;
-            }
+            let payload = {};
+            let targetEndpoint = '';
 
-            if (tab === 'remit') {
+            if (tab === 'private') {
+                const playerId = document.getElementById('p_fieldPlayerId').value.trim();
+                const amount = document.getElementById('p_fieldAmount').value.trim();
+                const trxId = document.getElementById('p_fieldTrxId').value.trim();
+
+                if (!playerId || !amount || !trxId) {
+                    showInCardAlert('private', 'error', 'সবগুলো ইনপুট ফিল্ড সঠিকভাবে পূরণ করুন!');
+                    return;
+                }
+                payload = { deposit_user_code: playerId, secret_transaction_code: trxId, amount: amount };
+                targetEndpoint = '/api/verify/private-user';
+
+            } else if (tab === 'remit') {
+                const playerId = document.getElementById('r_fieldPlayerId').value.trim();
+                const amount = document.getElementById('r_fieldAmount').value.trim();
+                const trxId = document.getElementById('r_fieldTrxId').value.trim();
+
+                if (!playerId || !amount || !trxId) {
+                    showInCardAlert('remit', 'error', 'সবগুলো ইনপুট ফিল্ড সঠিকভাবে পূরণ করুন!');
+                    return;
+                }
+
                 const radios = document.getElementsByName('gateway_select');
                 let selectionState = false;
                 for (let r of radios) { if (r.checked) selectionState = true; }
                 if (!selectionState) {
-                    showInCardAlert('remit', 'error', 'দয়া করে একটি গেটওয়ে সিলেক্ট করুন।');
+                    showInCardAlert('remit', 'error', 'দয়া করে একটি গেটওয়ে সিলেক্ট করুন।');
                     return;
                 }
+                payload = { deposit_user_code: playerId, secret_transaction_code: trxId, amount: amount };
+                targetEndpoint = '/api/verify/remittance';
+
+            } else if (tab === 'sms') {
+                const playerId = document.getElementById('s_fieldPlayerId').value.trim();
+                const amount = document.getElementById('s_fieldAmount').value.trim();
+                const last3Digits = document.getElementById('s_fieldLast3').value.trim();
+
+                if (!playerId || !amount || !last3Digits) {
+                    showInCardAlert('sms', 'error', 'সবগুলো ইনপুট ফিল্ড সঠিকভাবে পূরণ করুন!');
+                    return;
+                }
+
+                if (last3Digits.length !== 3 || isNaN(last3Digits)) {
+                    showInCardAlert('sms', 'error', 'শেষ ৩ ডিজিট সঠিকভাবে সংখ্যার মাধ্যমে লিখুন!');
+                    return;
+                }
+
+                payload = { 
+                    deposit_user_code: playerId, 
+                    amount: amount, 
+                    last_3_digits: last3Digits 
+                };
+                targetEndpoint = '/api/verify/sms';
             }
 
-            // বাটন লোডার মেকানিজম অন করা
+            // বাটন লোডার নিয়ন্ত্রণ
+            const prefix = tab === 'private' ? 'p_' : (tab === 'remit' ? 'r_' : 's_');
             const btn = document.getElementById(prefix + 'btnSubmit');
             const spinner = document.getElementById(prefix + 'spinner');
             const btnText = document.getElementById(prefix + 'btnText');
@@ -2017,40 +2638,38 @@ app.get('/', async (req, res) => {
             spinner.style.display = 'block';
             btnText.innerText = 'যাচাই করা হচ্ছে...';
 
-            const targetEndpoint = (tab === 'remit') ? '/api/verify/remittance' : '/api/verify/private-user';
-
             fetch(targetEndpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    deposit_user_code: playerId,
-                    secret_transaction_code: trxId,
-                    amount: amount
-                })
+                body: JSON.stringify(payload)
             })
             .then(res => res.json())
             .then(data => {
-                // বাটন রিলিজ
                 btn.disabled = false;
                 spinner.style.display = 'none';
-                btnText.innerText = 'জমা দিন';
+                btnText.innerText = tab === 'sms' ? 'যাচাই ও জমা দিন' : 'জমা দিন';
 
-                if(data.status === 'success') {
-                    showInCardAlert(tab, 'success', data.message || 'অনুমোদিত! ট্রানজেকশন সফল হয়েছে।');
+                if (data.status === 'success') {
+                    showInCardAlert(tab, 'success', data.message || 'অনুমোদিত! ডিপোজিট সফল হয়েছে।');
                     
-                    // বর্তমান ট্যাবের ফর্ম ফিল্ডগুলো বাটার-স্মুথ ক্লিয়ার করা
+                    // ইনপুট ফিল্ড সমূহ পরিষ্কার করা
                     document.getElementById(prefix + 'fieldPlayerId').value = '';
                     document.getElementById(prefix + 'fieldAmount').value = '';
-                    document.getElementById(prefix + 'fieldTrxId').value = '';
+                    if (tab === 'sms') {
+                        document.getElementById('s_fieldLast3').value = '';
+                    } else {
+                        document.getElementById(prefix + 'fieldTrxId').value = '';
+                    }
                     if (tab === 'remit') evaluateGatewayVisibility();
+
                 } else {
-                    showInCardAlert(tab, 'error', data.message || data.error || 'ভেরিফিকেশন রিজেক্ট করা হয়েছে!');
+                    showInCardAlert(tab, 'error', data.message || data.error || 'ভেরিফিকেশন রিজেক্ট করা হয়েছে!');
                 }
             })
             .catch(err => {
                 btn.disabled = false;
                 spinner.style.display = 'none';
-                btnText.innerText = 'জমা দিন';
+                btnText.innerText = tab === 'sms' ? 'যাচাই ও জমা দিন' : 'জমা দিন';
                 showInCardAlert(tab, 'error', 'সার্ভার রেসপন্স ট্রাফিক টাইমআউট এরর!');
             });
         }
@@ -2068,9 +2687,6 @@ app.get('/', async (req, res) => {
     return res.status(500).send("Fatal Web Pipeline Error: " + error.message);
   }
 });
-
-
-
 
 
 // const initDb = async () => {
