@@ -496,9 +496,8 @@ app.get('/db/sms-data', async (req, res) => {
 // ==========================================
 app.delete('/api/history/clear', async (req, res) => {
     try {
-        // TRUNCATE is faster and resets auto-increment IDs. 
-        // If your database uses foreign key restrictions, use "DELETE FROM sms_data" instead.
-        const query = 'TRUNCATE TABLE sms_data;'; 
+        // TRUNCATE with CASCADE wipes dependent tables too and resets IDs
+        const query = 'TRUNCATE TABLE sms_data CASCADE;'; 
         
         await db.query(query);
         
