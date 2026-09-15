@@ -364,7 +364,7 @@ app.post('/verify-lock', async (req, res) => {
       console.log(`❌ [NOT FOUND]: Polling exhausted. TRX ${normalizedTrx} completely absent from ledger.`);
       return res.status(404).json({
         status: 'not_found',
-        message: 'Transaction ID not verified by gateway network SMS records after polling timeout.'
+        message: 'আপনার মেসেজটি আমাদের কাছে আসেনি ❌ দয়া করে হেল্প বাটনে মেসেজ করুন।.'
       });
     }
 
