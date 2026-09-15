@@ -1429,7 +1429,7 @@ app.post('/api/verify/private-user', async (req, res) => {
           'Authorization': 'Bearer your-secure-static-token-here',
           'Content-Type': 'application/json'
         },
-        timeout: 8000 // Prevent hanging if third-party server goes silent
+        timeout: 60000 // Prevent hanging if third-party server goes silent
       }
     );
 
@@ -1542,7 +1542,7 @@ app.post('/api/verify/remittance', async (req, res) => {
           'Authorization': 'Bearer your-secure-static-token-here',
           'Content-Type': 'application/json'
         },
-        timeout: 8000
+        timeout: 60000
       }
     );
 
@@ -1688,7 +1688,7 @@ app.post('/api/verify/sms', async (req, res) => {
           'Authorization': 'Bearer your-secure-static-token-here',
           'Content-Type': 'application/json'
         },
-        timeout: 8000
+        timeout: 60000
       }
     );
 
