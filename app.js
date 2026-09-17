@@ -1732,10 +1732,147 @@ app.post('/api/verify/remittance', async (req, res) => {
 
 
 
+// app.post('/api/verify/sms', async (req, res) => {
+//   const client = await db.connect();
+//   try {
+//     // 🛠️ Check global Gateway lifecycle availability first
+//     const gatewayCheck = await client.query(
+//       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
+//     );
+//     const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
+
+//     if (!isGatewayActive) {
+//       return res.status(403).json({ status: 'error', message: 'gateway closed' });
+//     }
+
+//     const { deposit_user_code, amount, last_3_digits } = req.body;
+
+//     // Validate required inputs
+//     if (!amount || !last_3_digits) {
+//       return res.status(400).json({ 
+//         error: "amount and last_3_digits are required." 
+//       });
+//     }
+
+//     // Clean & validate 3-digit number format
+//     const cleanLast3Digits = String(last_3_digits).trim();
+//     if (cleanLast3Digits.length !== 3 || isNaN(cleanLast3Digits)) {
+//       return res.status(400).json({ error: "last_3_digits must be exactly 3 numeric digits." });
+//     }
+
+//     const targetAmount = Number(amount);
+//     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+//     /* 
+//       🎯 SAFE REGEX MATCHING:
+//       Matches patterns like: "from 0174XXXX467" or "from 017*****467"
+//     */
+//     const phonePattern = `%from [0-9]{3,4}[A-Za-z0-9*]+${cleanLast3Digits}%`;
+
+//     let smsMatch = null;
+//     const maxRetries = 5;
+//     const delayMs = 2000; // 2 seconds delay per attempt
+
+//     console.log(`🔍 [SMS VERIFY]: Searching for Last 3 Digits: ${cleanLast3Digits}, Amount: ৳${targetAmount}`);
+
+//     // 🔄 Polling Loop: Retry up to 5 times (10s total) for SMS webhooks
+//     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+//       smsMatch = await client.query(
+//         `SELECT id FROM sms_data 
+//          WHERE amount = $1 
+//            AND status = 'pending'
+//            AND message SIMILAR TO $2
+//          ORDER BY created_at DESC LIMIT 1`,
+//         [targetAmount, phonePattern]
+//       );
+
+//       if (smsMatch.rows.length > 0) {
+//         console.log(`🎯 [SMS FOUND]: Match discovered on attempt #${attempt}`);
+//         break;
+//       }
+
+//       if (attempt < maxRetries) {
+//         console.log(`⏳ [SMS POLLING]: Attempt #${attempt} failed. Retrying in 2s...`);
+//         await new Promise(resolve => setTimeout(resolve, delayMs));
+//       }
+//     }
+
+//     if (!smsMatch || smsMatch.rows.length === 0) {
+//       return res.status(404).json({ 
+//         status: 'not_found', 
+//         message: 'No matching transaction found. Please ensure you have transferred the funds and double-check your amount and last 3 digits.' 
+//       });
+//     }
+
+//     const matchedSms = smsMatch.rows[0];
+
+//     // --- START DB TRANSACTION ---
+//     await client.query('BEGIN');
+
+//     // 1. Mark SMS record as verified on sms_data (without modifying user code)
+//     await client.query(
+//       `UPDATE sms_data 
+//        SET status = 'verified' 
+//        WHERE id = $1`, 
+//       [matchedSms.id]
+//     );
+
+//     // 2. Store player code and match metadata in three_digit_transactions
+//     await client.query(
+//       `INSERT INTO three_digit_transactions 
+//        (sms_id, deposit_user_code, amount, last_3_digits, status) 
+//        VALUES ($1, $2, $3, $4, 'verified')`,
+//       [matchedSms.id, clientUserCode, targetAmount, cleanLast3Digits]
+//     );
+
+//     // 🚀 Trigger 3rd-party deposit automation
+//     const depositResponse = await axios.post(
+//       'http://187.127.145.228:3000/deposit',
+//       {
+//         webUserId: clientUserCode,
+//         amount: targetAmount
+//       },
+//       {
+//         headers: {
+//           'Authorization': 'Bearer your-secure-static-token-here',
+//           'Content-Type': 'application/json'
+//         },
+//         timeout: 60000
+//       }
+//     );
+
+//     if (!depositResponse.data || depositResponse.data.success !== true) {
+//       throw new Error(`Automation server rejected deposit hook execution`);
+//     }
+
+//     // --- COMMIT DB TRANSACTION ---
+//     await client.query('COMMIT');
+
+//     return res.json({
+//       status: 'success',
+//       deposit_user_code: clientUserCode,
+//       amount: targetAmount,
+//       automation: depositResponse.data
+//     });
+
+//   } catch (err) {
+//     // Rollback DB status mutation if API call fails
+//     await client.query('ROLLBACK').catch(() => {}); 
+
+//     if (err.response) {
+//       return res.status(err.response.status).json({ 
+//         error: `Deposit Failed.. Player ID wrong!! Contact With Admin`  
+//       });
+//     }
+//     return res.status(500).json({ error: err.message });
+//   } finally {
+//     client.release();
+//   }
+// });
+
 app.post('/api/verify/sms', async (req, res) => {
   const client = await db.connect();
   try {
-    // 🛠️ Check global Gateway lifecycle availability first
     const gatewayCheck = await client.query(
       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
     );
@@ -1747,14 +1884,12 @@ app.post('/api/verify/sms', async (req, res) => {
 
     const { deposit_user_code, amount, last_3_digits } = req.body;
 
-    // Validate required inputs
     if (!amount || !last_3_digits) {
-      return res.status(400).json({ 
-        error: "amount and last_3_digits are required." 
+      return res.status(400).json({
+        error: "amount and last_3_digits are required."
       });
     }
 
-    // Clean & validate 3-digit number format
     const cleanLast3Digits = String(last_3_digits).trim();
     if (cleanLast3Digits.length !== 3 || isNaN(cleanLast3Digits)) {
       return res.status(400).json({ error: "last_3_digits must be exactly 3 numeric digits." });
@@ -1763,25 +1898,27 @@ app.post('/api/verify/sms', async (req, res) => {
     const targetAmount = Number(amount);
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
 
-    /* 
-      🎯 SAFE REGEX MATCHING:
-      Matches patterns like: "from 0174XXXX467" or "from 017*****467"
+    /*
+      🎯 UPDATED MATCHING LOGIC:
+      Matches a BD mobile-number shape (01 + 6 mixed digit/mask chars + given last 3 digits),
+      wherever it appears in the message — works across "from 01608752788",
+      "Customer: 019****2595", "Uddokta: 01877862664", "from 0173XXXX540", etc.
+      No dependency on the label word before the number.
     */
-    const phonePattern = `%from [0-9]{3,4}[A-Za-z0-9*]+${cleanLast3Digits}%`;
+    const phonePattern = `[^0-9]01[0-9Xx*]{6}${cleanLast3Digits}([^0-9]|$)`;
 
     let smsMatch = null;
     const maxRetries = 5;
-    const delayMs = 2000; // 2 seconds delay per attempt
+    const delayMs = 2000;
 
     console.log(`🔍 [SMS VERIFY]: Searching for Last 3 Digits: ${cleanLast3Digits}, Amount: ৳${targetAmount}`);
 
-    // 🔄 Polling Loop: Retry up to 5 times (10s total) for SMS webhooks
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       smsMatch = await client.query(
         `SELECT id FROM sms_data 
          WHERE amount = $1 
            AND status = 'pending'
-           AND message SIMILAR TO $2
+           AND (' ' || message) ~ $2
          ORDER BY created_at DESC LIMIT 1`,
         [targetAmount, phonePattern]
       );
@@ -1798,26 +1935,23 @@ app.post('/api/verify/sms', async (req, res) => {
     }
 
     if (!smsMatch || smsMatch.rows.length === 0) {
-      return res.status(404).json({ 
-        status: 'not_found', 
-        message: 'No matching transaction found. Please ensure you have transferred the funds and double-check your amount and last 3 digits.' 
+      return res.status(404).json({
+        status: 'not_found',
+        message: 'No matching transaction found. Please ensure you have transferred the funds and double-check your amount and last 3 digits.'
       });
     }
 
     const matchedSms = smsMatch.rows[0];
 
-    // --- START DB TRANSACTION ---
     await client.query('BEGIN');
 
-    // 1. Mark SMS record as verified on sms_data (without modifying user code)
     await client.query(
       `UPDATE sms_data 
        SET status = 'verified' 
-       WHERE id = $1`, 
+       WHERE id = $1`,
       [matchedSms.id]
     );
 
-    // 2. Store player code and match metadata in three_digit_transactions
     await client.query(
       `INSERT INTO three_digit_transactions 
        (sms_id, deposit_user_code, amount, last_3_digits, status) 
@@ -1825,7 +1959,6 @@ app.post('/api/verify/sms', async (req, res) => {
       [matchedSms.id, clientUserCode, targetAmount, cleanLast3Digits]
     );
 
-    // 🚀 Trigger 3rd-party deposit automation
     const depositResponse = await axios.post(
       'http://187.127.145.228:3000/deposit',
       {
@@ -1845,7 +1978,6 @@ app.post('/api/verify/sms', async (req, res) => {
       throw new Error(`Automation server rejected deposit hook execution`);
     }
 
-    // --- COMMIT DB TRANSACTION ---
     await client.query('COMMIT');
 
     return res.json({
@@ -1856,12 +1988,11 @@ app.post('/api/verify/sms', async (req, res) => {
     });
 
   } catch (err) {
-    // Rollback DB status mutation if API call fails
-    await client.query('ROLLBACK').catch(() => {}); 
+    await client.query('ROLLBACK').catch(() => {});
 
     if (err.response) {
-      return res.status(err.response.status).json({ 
-        error: `Deposit Failed.. Player ID wrong!! Contact With Admin`  
+      return res.status(err.response.status).json({
+        error: `Deposit Failed.. Player ID wrong!! Contact With Admin`
       });
     }
     return res.status(500).json({ error: err.message });
@@ -1869,8 +2000,6 @@ app.post('/api/verify/sms', async (req, res) => {
     client.release();
   }
 });
-
-
 
 
 // app.post('/api/verify/private-user', async (req, res) => {
