@@ -1369,26 +1369,150 @@ app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
 
 
 
+// app.post('/api/verify/private-user', async (req, res) => {
+//   // Start a transaction client from the pool
+//   const client = await db.connect();
+//   try {
+//     // 🛠️ Check global Gateway lifecycle availability first
+//     const gatewayCheck = await client.query(
+//       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
+//     );
+//     const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
+
+//     if (!isGatewayActive) {
+//       return res.status(403).json({ status: 'error', message: 'gateway closed' });
+//     }
+
+//     const { deposit_user_code, secret_transaction_code, amount } = req.body;
+
+//     if (!secret_transaction_code || !amount) {
+//       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
+//     }
+
+//     const privateCodeCheck = await client.query(
+//       `SELECT c.id AS code_id, u.id AS user_id, u.username
+//        FROM user_codes c
+//        JOIN users_v2 u ON c.user_id = u.id
+//        WHERE c.secret_transaction_code = $1 
+//          AND c.is_code_active = true 
+//          AND u.is_private_user = true`,
+//       [secret_transaction_code.trim()]
+//     );
+
+//     if (privateCodeCheck.rows.length === 0) {
+//       return res.status(401).json({ status: 'unauthorized', message: 'Access denied.' });
+//     }
+
+//     const { code_id, user_id, username } = privateCodeCheck.rows[0];
+//     const targetAmount = Number(amount);
+//     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+
+//     // --- START TRANSACTION ---
+//     await client.query('BEGIN');
+
+//     // Insert transaction state provisionally
+//     await client.query(
+//       `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status, action_by_username)
+//        VALUES ($1, $2, $3, $4, 'success', $5)`,
+//       [user_id, code_id, clientUserCode, targetAmount, username]
+//     );
+
+//     // 🚀 Call third-party deposit service while DB changes are pending
+//     const depositResponse = await axios.post(
+//       'http://187.127.145.228:3000/deposit',
+//       {
+//         webUserId: clientUserCode,
+//         amount: targetAmount
+//       },
+//       {
+//         headers: {
+//           'Authorization': 'Bearer your-secure-static-token-here',
+//           'Content-Type': 'application/json'
+//         },
+//         timeout: 60000 // Prevent hanging if third-party server goes silent
+//       }
+//     );
+
+//     // Check if third-party application internal validation failed
+//     if (!depositResponse.data || depositResponse.data.success !== true) {
+//       throw new Error(`Automation server rejected deposit hook execution`);
+//     }
+
+//     // --- COMMIT BOTH IF EVERYTHING IS SUCCESSFUL ---
+//     await client.query('COMMIT');
+
+//     return res.json({
+//       status: 'success',
+//       is_vip_bypass: true,
+//       deposit_user_code: clientUserCode,
+//       amount: targetAmount,
+//       automation: depositResponse.data
+//     });
+
+//   } catch (err) {
+//     // Roll back database changes if an error occurred after 'BEGIN'
+//     await client.query('ROLLBACK').catch(() => {}); 
+    
+//     if (err.response) {
+//       return res.status(err.response.status).json({ 
+//         error: `Deposit Failed.. Player ID wrong!! Contact With Admin` 
+//       });
+//     }
+//     return res.status(500).json({ error: err.message });
+//   } finally {
+//     client.release(); // Always return client connection back to pool
+//   }
+// });
+
 app.post('/api/verify/private-user', async (req, res) => {
-  // Start a transaction client from the pool
-  const client = await db.connect();
+  const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const log = (msg, data = {}) => console.log(`[verify/private-user][${reqId}]`, msg, data);
+
+  log('Request received', { body: req.body });
+
+  log('Acquiring DB client from pool');
+  const client = await db.connect().catch(err => {
+    log('DB connect FAILED', { error: err.message, code: err.code });
+    return null;
+  });
+
+  if (!client) {
+    return res.status(503).json({ status: 'error', message: 'database unavailable' });
+  }
+  log('DB client acquired');
+
   try {
-    // 🛠️ Check global Gateway lifecycle availability first
+    log('Checking gateway active flag');
     const gatewayCheck = await client.query(
       "SELECT config_value FROM system_configs WHERE config_key = 'version2gateway_active';"
     );
+    log('Gateway check query result', { rows: gatewayCheck.rows });
+
     const isGatewayActive = gatewayCheck.rows.length > 0 && gatewayCheck.rows[0].config_value === 'active';
+    log('Gateway active?', { isGatewayActive });
 
     if (!isGatewayActive) {
+      log('Rejecting: gateway closed');
       return res.status(403).json({ status: 'error', message: 'gateway closed' });
     }
 
     const { deposit_user_code, secret_transaction_code, amount } = req.body;
+    log('Parsed request body', { deposit_user_code, secret_transaction_code, amount });
 
-    if (!secret_transaction_code || !amount) {
+    if (!secret_transaction_code || amount === undefined || amount === null) {
+      log('Rejecting: missing required fields');
       return res.status(400).json({ error: "secret_transaction_code and amount are required." });
     }
 
+    const targetAmount = Number(amount);
+    log('Parsed amount', { targetAmount, isValid: Number.isFinite(targetAmount) });
+
+    if (!Number.isFinite(targetAmount) || targetAmount <= 0) {
+      log('Rejecting: invalid amount');
+      return res.status(400).json({ error: "amount must be a positive number." });
+    }
+
+    log('Looking up secret_transaction_code', { code: secret_transaction_code.trim() });
     const privateCodeCheck = await client.query(
       `SELECT c.id AS code_id, u.id AS user_id, u.username
        FROM user_codes c
@@ -1398,26 +1522,34 @@ app.post('/api/verify/private-user', async (req, res) => {
          AND u.is_private_user = true`,
       [secret_transaction_code.trim()]
     );
+    log('Code lookup result', { rowCount: privateCodeCheck.rows.length, rows: privateCodeCheck.rows });
 
     if (privateCodeCheck.rows.length === 0) {
+      log('Rejecting: code not found / inactive / not private user');
       return res.status(401).json({ status: 'unauthorized', message: 'Access denied.' });
     }
 
     const { code_id, user_id, username } = privateCodeCheck.rows[0];
-    const targetAmount = Number(amount);
     const clientUserCode = deposit_user_code ? deposit_user_code.trim() : null;
+    log('Resolved identity', { code_id, user_id, username, clientUserCode });
 
-    // --- START TRANSACTION ---
+    log('BEGIN transaction');
     await client.query('BEGIN');
 
-    // Insert transaction state provisionally
-    await client.query(
+    log('Inserting provisional transaction row', {
+      user_id, code_id, clientUserCode, targetAmount, username
+    });
+    const insertResult = await client.query(
       `INSERT INTO private_user_transactions (user_id, verified_by_code_id, submitted_user_code, amount, status, action_by_username)
-       VALUES ($1, $2, $3, $4, 'success', $5)`,
+       VALUES ($1, $2, $3, $4, 'success', $5) RETURNING id`,
       [user_id, code_id, clientUserCode, targetAmount, username]
     );
+    log('Insert successful', { transactionId: insertResult.rows[0]?.id });
 
-    // 🚀 Call third-party deposit service while DB changes are pending
+    log('Calling third-party deposit service', {
+      url: 'http://187.127.145.228:3000/deposit',
+      payload: { webUserId: clientUserCode, amount: targetAmount }
+    });
     const depositResponse = await axios.post(
       'http://187.127.145.228:3000/deposit',
       {
@@ -1429,17 +1561,19 @@ app.post('/api/verify/private-user', async (req, res) => {
           'Authorization': 'Bearer your-secure-static-token-here',
           'Content-Type': 'application/json'
         },
-        timeout: 60000 // Prevent hanging if third-party server goes silent
+        timeout: 60000
       }
     );
+    log('Deposit service responded', { status: depositResponse.status, data: depositResponse.data });
 
-    // Check if third-party application internal validation failed
     if (!depositResponse.data || depositResponse.data.success !== true) {
+      log('Deposit service returned non-success payload — will roll back');
       throw new Error(`Automation server rejected deposit hook execution`);
     }
 
-    // --- COMMIT BOTH IF EVERYTHING IS SUCCESSFUL ---
+    log('COMMIT transaction');
     await client.query('COMMIT');
+    log('Commit successful — request complete');
 
     return res.json({
       status: 'success',
@@ -1450,20 +1584,35 @@ app.post('/api/verify/private-user', async (req, res) => {
     });
 
   } catch (err) {
-    // Roll back database changes if an error occurred after 'BEGIN'
-    await client.query('ROLLBACK').catch(() => {}); 
-    
+    log('ERROR caught — rolling back', {
+      message: err.message,
+      code: err.code,
+      detail: err.detail,
+      hasAxiosResponse: !!err.response,
+      axiosStatus: err.response?.status,
+      axiosData: err.response?.data
+    });
+
+    await client.query('ROLLBACK').catch(rbErr => {
+      log('ROLLBACK itself failed', { error: rbErr.message });
+    });
+    log('Rollback complete');
+
     if (err.response) {
-      return res.status(err.response.status).json({ 
-        error: `Deposit Failed.. Player ID wrong!! Contact With Admin` 
+      log('Returning upstream error response to caller', { status: err.response.status });
+      return res.status(err.response.status).json({
+        error: `Deposit Failed.. Player ID wrong!! Contact With Admin`
       });
     }
+
+    log('Returning generic 500 to caller');
     return res.status(500).json({ error: err.message });
+
   } finally {
-    client.release(); // Always return client connection back to pool
+    client.release();
+    log('DB client released back to pool');
   }
 });
-
 
 app.post('/api/verify/remittance', async (req, res) => {
   const client = await db.connect();
