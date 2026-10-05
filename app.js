@@ -1463,7 +1463,31 @@ app.get('/api/admin/remittance/history-user/:userId', async (req, res) => {
 //     client.release(); // Always return client connection back to pool
 //   }
 // });
+// DELETE a single transaction by trx_id
+// NOTE: must be declared AFTER app.delete('/api/history/clear', ...)
+app.delete('/api/history/:trxId', async (req, res) => {
+  const { trxId } = req.params;
 
+  if (!trxId || trxId === 'clear') {
+    return res.status(400).json({ error: 'Invalid transaction id' });
+  }
+
+  try {
+    // PostgreSQL
+    const result = await pool.query(
+      'DELETE FROM sms_data WHERE trx_id = $1',
+      [trxId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+    return res.status(200).json({ success: true, deleted: result.rowCount });
+  } catch (err) {
+    console.error('Single delete error:', err);
+    return res.status(500).json({ error: 'Failed to delete transaction' });
+  }
+});
 app.post('/api/verify/private-user', async (req, res) => {
   const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const log = (msg, data = {}) => console.log(`[verify/private-user][${reqId}]`, msg, data);
