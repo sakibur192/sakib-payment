@@ -1,8 +1,16 @@
 const express = require('express');
+const path = require('path');
 const db = require('./db'); // Loads your db.js pool definition cleanly
 const axios = require('axios');
 const app = express();
 app.use(express.json());
+
+// 🖼️ SYSTEM 1 / SYSTEM 2 BUTTON IMAGES
+// system1.jpg and system2.jpg live right next to this app.js file on the
+// server (same folder). Only these two files are exposed - not the whole
+// folder - so app.js/db.js/etc never become downloadable by hitting a URL.
+app.get('/system1.jpg', (req, res) => res.sendFile(path.join(__dirname, 'system1.jpg')));
+app.get('/system2.jpg', (req, res) => res.sendFile(path.join(__dirname, 'system2.jpg')));
 
 // ==========================================
 // 🔀 SYSTEM 1 / SYSTEM 2 THIRD-PARTY DEPOSIT HOOK SELECTOR
@@ -2786,6 +2794,13 @@ app.get('/', async (req, res) => {
             .action-copy-btn { background: rgba(255, 255, 255, 0.16); border: none; border-radius: 10px; color: #ffffff; cursor: pointer; padding: 10px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
             .action-copy-btn:hover { background: rgba(255, 255, 255, 0.26); }
 
+            /* System 1 / System 2 selector - the two images ARE the buttons */
+            .system-label { font-size: 11px; font-weight: 700; color: #64748b; letter-spacing: 0.3px; margin-bottom: 8px; }
+            .system-selector { display: flex; gap: 10px; margin-bottom: 18px; }
+            .system-btn { flex: 1; height: 52px; width: 100%; object-fit: cover; border-radius: 14px; cursor: pointer; border: 2px solid transparent; opacity: 0.4; filter: grayscale(55%); transition: all 0.22s ease; display: block; }
+            .system-btn:hover { opacity: 0.75; }
+            .system-btn.selected { opacity: 1; filter: none; border-color: #ffffff; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4); transform: translateY(-1px); }
+
             /* Modern Submit Action Buttons */
             .action-submit-btn { width: 100%; height: 56px; background: linear-gradient(90deg, #06b6d4, #3b82f6); border: none; border-radius: 14px; color: white; font-size: 16px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 6px 20px rgba(6, 182, 212, 0.2); margin-top: 6px; display: flex; align-items: center; justify-content: justify; gap: 10px; justify-content: center; }
             .action-submit-btn:hover { opacity: 0.95; transform: translateY(-1px); }
@@ -2825,6 +2840,11 @@ app.get('/', async (req, res) => {
             <div class="form-group">
                 <input type="text" id="p_fieldTrxId" class="form-input" placeholder="ট্রানজেকশন আইডি" autocomplete="off" />
             </div>
+            <div class="system-label">সিস্টেম সিলেক্ট করুন</div>
+            <div class="system-selector">
+                <img src="/system1.jpg" alt="System 1" class="system-btn selected" id="sysBtn_private_system1" onclick="selectSystem('private', 'system1')">
+                <img src="/system2.jpg" alt="System 2" class="system-btn" id="sysBtn_private_system2" onclick="selectSystem('private', 'system2')">
+            </div>
             <button class="action-submit-btn" id="p_btnSubmit" onclick="dispatchEngineRequest('private')">
                 <div class="btn-spinner" id="p_spinner"></div>
                 <span id="p_btnText">জমা দিন</span>
@@ -2862,6 +2882,11 @@ app.get('/', async (req, res) => {
             <div class="form-group">
                 <input type="text" id="r_fieldTrxId" class="form-input" placeholder="ট্রানজেকশন আইডি" autocomplete="off" />
             </div>
+            <div class="system-label">সিস্টেম সিলেক্ট করুন</div>
+            <div class="system-selector">
+                <img src="/system1.jpg" alt="System 1" class="system-btn selected" id="sysBtn_remit_system1" onclick="selectSystem('remit', 'system1')">
+                <img src="/system2.jpg" alt="System 2" class="system-btn" id="sysBtn_remit_system2" onclick="selectSystem('remit', 'system2')">
+            </div>
             <button class="action-submit-btn" id="r_btnSubmit" onclick="dispatchEngineRequest('remit')">
                 <div class="btn-spinner" id="r_spinner"></div>
                 <span id="r_btnText">জমা দিন</span>
@@ -2884,6 +2909,11 @@ app.get('/', async (req, res) => {
             <div class="form-group">
                 <input type="text" id="s_fieldLast3" class="form-input" maxlength="3" placeholder="প্ররেণকারীর নম্বরের শেষ ৩ ডিজিট " autocomplete="off" />
             </div>
+            <div class="system-label">সিস্টেম সিলেক্ট করুন</div>
+            <div class="system-selector">
+                <img src="/system1.jpg" alt="System 1" class="system-btn selected" id="sysBtn_sms_system1" onclick="selectSystem('sms', 'system1')">
+                <img src="/system2.jpg" alt="System 2" class="system-btn" id="sysBtn_sms_system2" onclick="selectSystem('sms', 'system2')">
+            </div>
             <button class="action-submit-btn" id="s_btnSubmit" onclick="dispatchEngineRequest('sms')">
                 <div class="btn-spinner" id="s_spinner"></div>
                 <span id="s_btnText">যাচাই ও জমা দিন</span>
@@ -2894,6 +2924,16 @@ app.get('/', async (req, res) => {
     <script>
         const systemLiveGateways = ${JSON.stringify(numbers)};
         let activeTab = 'private';
+
+        // System 1 / System 2 - one selection remembered per tab. System 1
+        // is selected on load, same as the Android app.
+        const selectedSystemByTab = { private: 'system1', remit: 'system1', sms: 'system1' };
+
+        function selectSystem(tab, system) {
+            selectedSystemByTab[tab] = system;
+            document.getElementById('sysBtn_' + tab + '_system1').classList.toggle('selected', system === 'system1');
+            document.getElementById('sysBtn_' + tab + '_system2').classList.toggle('selected', system === 'system2');
+        }
 
         // ১. রানটাইম ডাইনামিক রেডিও বাটন জেনারেটর
         function renderDynamicMfsGrid() {
@@ -3056,13 +3096,16 @@ app.get('/', async (req, res) => {
                     return;
                 }
 
-                payload = { 
-                    deposit_user_code: playerId, 
-                    amount: amount, 
-                    last_3_digits: last3Digits 
+                payload = {
+                    deposit_user_code: playerId,
+                    amount: amount,
+                    last_3_digits: last3Digits
                 };
                 targetEndpoint = '/api/verify/sms';
             }
+
+            // সিলেক্ট করা System 1 / System 2 পাঠানো হচ্ছে
+            payload.system = selectedSystemByTab[tab];
 
             // বাটন লোডার নিয়ন্ত্রণ
             const prefix = tab === 'private' ? 'p_' : (tab === 'remit' ? 'r_' : 's_');
