@@ -88,30 +88,40 @@ function parseCityBankSms(message) {
   };
 }
 
-// PostgreSQL regex: "Card: 018***0049" style masked number ending with the given 3 digits.
-function cityBankLast3Pattern(last3) {
-  return `Card\\s*:?\\s*01[0-9]*[*Xx]+[0-9]*${last3}([^0-9]|$)`;
+// PostgreSQL regex for a City Bank masked number like "Card: 018***0049".
+// Two ways of matching the agent's 3 digits (e.g. 049):
+//   shifted = false -> the SMS number ENDS with them:          018***0049 -> "049"
+//   shifted = true  -> they sit just before the SMS last digit: 018***0049 -> "004"
+function cityBankLast3Pattern(last3, shifted = false) {
+  const tail = shifted ? `${last3}[0-9]` : last3;
+  return `Card\\s*:?\\s*01[0-9]*[*Xx]+[0-9]*${tail}([^0-9]|$)`;
 }
 
 // Finds the newest pending City Bank SMS for this amount + last 3 digits. Polls a few times (SMS can arrive late).
+// Each attempt tries the normal match (049) first; only if none is found, the shifted match (004).
 async function findCityBankSmsByPhone(phone, amount, maxRetries = 5, delayMs = 2000) {
   const last3 = String(phone).trim().slice(-3);
-  const pattern = cityBankLast3Pattern(last3);
+  const passes = [
+    { label: 'last 3', pattern: cityBankLast3Pattern(last3) },
+    { label: 'shifted', pattern: cityBankLast3Pattern(last3, true) }
+  ];
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const result = await db.query(
-      `SELECT * FROM sms_data
-       WHERE LOWER(REGEXP_REPLACE(sender, '[^a-zA-Z]', '', 'g')) = 'citybank'
-         AND amount = $1
-         AND status = 'pending'
-         AND message ~* $2
-       ORDER BY created_at DESC LIMIT 1`,
-      [amount, pattern]
-    );
+    for (const pass of passes) {
+      const result = await db.query(
+        `SELECT * FROM sms_data
+         WHERE LOWER(REGEXP_REPLACE(sender, '[^a-zA-Z]', '', 'g')) = 'citybank'
+           AND amount = $1
+           AND status = 'pending'
+           AND message ~* $2
+         ORDER BY created_at DESC LIMIT 1`,
+        [amount, pass.pattern]
+      );
 
-    if (result.rows.length > 0) {
-      console.log(`🏦 [CITY BANK]: ...${last3} ৳${amount} matched on attempt #${attempt}`);
-      return result.rows[0];
+      if (result.rows.length > 0) {
+        console.log(`🏦 [CITY BANK]: ...${last3} ৳${amount} matched (${pass.label}) on attempt #${attempt}`);
+        return result.rows[0];
+      }
     }
 
     if (attempt < maxRetries) {
@@ -1382,10 +1392,23 @@ app.post('/api/verify/sms', async (req, res) => {
            AND status = 'pending'
            AND (
              (' ' || message) ~ $2
-             OR (LOWER(REGEXP_REPLACE(sender, '[^a-zA-Z]', '', 'g')) = 'citybank' AND message ~* $3)
+             OR (LOWER(REGEXP_REPLACE(sender, '[^a-zA-Z]', '', 'g')) = 'citybank'
+                 AND (message ~* $3 OR message ~* $4))
            )
-         ORDER BY created_at DESC LIMIT 1`,
-        [targetAmount, phonePattern, cityBankLast3Pattern(cleanLast3Digits)]
+         ORDER BY
+           CASE
+             WHEN (' ' || message) ~ $2 THEN 0
+             WHEN message ~* $3 THEN 0
+             ELSE 1
+           END,
+           created_at DESC
+         LIMIT 1`,
+        [
+          targetAmount,
+          phonePattern,
+          cityBankLast3Pattern(cleanLast3Digits),
+          cityBankLast3Pattern(cleanLast3Digits, true)
+        ]
       );
 
       if (smsMatch.rows.length > 0) {
